@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use chrono_tz::{Tz, Tz::UTC};
-use lalrpop_util::ParseError;
 use crate::{Error, interval, types::{Field, Type}};
 use crate::parse::consts::{QBIT_MAX_STRIDE_GROUPS, QBIT_STRIDE_ALIGNMENT_BITS};
 use super::{enum_variants, quoted, lexer::{Kw, Tok}};
@@ -164,9 +163,9 @@ pub Type: Type<'input> = {
     "Nested" "(" <fields:Comma1<Field>> ")" => Type::Nested(fields),
     "Variant" "(" <types:Comma1<Type>> ")" => Type::Variant(types),
     "Enum8" "(" <pairs:Comma1<EnumPair<I8>>> ")"
-        =>? enum_variants(pairs).map(Type::Enum8).map_err(|error| ParseError::User { error }),
+        =>? enum_variants(pairs).map(Type::Enum8).map_err(Into::into),
     "Enum16" "(" <pairs:Comma1<EnumPair<I16>>> ")"
-        =>? enum_variants(pairs).map(Type::Enum16).map_err(|error| ParseError::User { error }),
+        =>? enum_variants(pairs).map(Type::Enum16).map_err(Into::into),
     "Dynamic" <("(" "max_types" "=" NUMBER ")")?> => Type::Dynamic,
     "JSON" <args:("(" <JsonArguments> ")")?> => {
         let mut fields = args.unwrap_or_default();
@@ -179,7 +178,7 @@ pub Type: Type<'input> = {
     // `IAggregateFunction::serialize` with no length prefix, so the column can be neither
     // decoded nor skipped without a per-function state layout. Reject only after the whole
     // production has parsed so the error surfaces at any nesting depth.
-    "AggregateFunction" "(" (U64 ",")? AggregateName AggregateParameters? ("," Type)* ")"
+    "AggregateFunction" "(" (U64 ",")? AggregateName AggregateParameters? AggregateTypes ")"
         =>? Err(Error::NotImplemented("AggregateFunction state columns".into()).into()),
     // Distinguish a malformed declaration (`Error::Parse`) from a valid one this reader
     // does not decode (`Error::NotImplemented`); the checks mirror `DataTypeQBit::DataTypeQBit`.
@@ -210,22 +209,22 @@ Comma1<T>: Vec<T> = {
 };
 
 U8: u8 = <n:NUMBER> =>? n.parse()
-    .map_err(|_| ParseError::User { error: Error::Parse("number out of range".into()) });
+    .map_err(|_| Error::Parse("number out of range".into()).into());
 Usize: usize = <n:NUMBER> =>? n.parse()
-    .map_err(|_| ParseError::User { error: Error::Parse("number out of range".into()) });
+    .map_err(|_| Error::Parse("number out of range".into()).into());
 U64: u64 = <n:NUMBER> =>? n.parse()
-    .map_err(|_| ParseError::User { error: Error::Parse("number out of range".into()) });
+    .map_err(|_| Error::Parse("number out of range".into()).into());
 I8: i8 = <n:SignedNumber> =>? n.parse()
-    .map_err(|_| ParseError::User { error: Error::Parse("enum value out of range".into()) });
+    .map_err(|_| Error::Parse("enum value out of range".into()).into());
 I16: i16 = <n:SignedNumber> =>? n.parse()
-    .map_err(|_| ParseError::User { error: Error::Parse("enum value out of range".into()) });
+    .map_err(|_| Error::Parse("enum value out of range".into()).into());
 
 SignedNumber: &'input str = { NUMBER, NEGATIVE };
 
 Quoted: Cow<'input, str> = <s:QUOTED> =>? quoted(s).map_err(Into::into);
 Backquoted: Cow<'input, str> = <s:BACKQUOTED> =>? quoted(s).map_err(Into::into);
 Timezone: Tz = <s:Quoted> =>? s.parse()
-    .map_err(|_| ParseError::User { error: Error::Parse("unknown timezone".into()) });
+    .map_err(|_| Error::Parse("unknown timezone".into()).into());
 
 EnumPair<T>: (Cow<'input, str>, T) = <label:Quoted> " " "=" " " <value:T> => (label, value);
 
@@ -271,6 +270,12 @@ AggregateTokens: () = {
 AggregateParameter: () = {
     Word => (), PATH => (), NEGATIVE => (), QUOTED => (), BACKQUOTED => (),
     AggregateParameters => (), "," => (), "=" => (), " " => (),
+};
+
+// Validate argument types without collecting a vector that would only be discarded.
+AggregateTypes: () = {
+    => (),
+    AggregateTypes "," Type => (),
 };
 
 QBitElement: () = { "Int8" => (), "BFloat16" => (), "Float32" => (), "Float64" => () };

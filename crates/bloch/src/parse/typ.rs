@@ -1,5 +1,7 @@
 use std::{borrow::Cow, collections::HashSet};
 
+use bstr::ByteSlice as _;
+
 use crate::{Error, types::Type};
 
 mod lexer;
@@ -72,44 +74,55 @@ fn enum_variants<T: PartialOrd>(
 fn quoted(token: &str) -> crate::Result<Cow<'_, str>> {
     let quote = token.as_bytes()[0];
     let text = &token[1..token.len() - 1];
-    let Some(first_escape) = text.bytes().position(|byte| byte == b'\\' || byte == quote) else {
+    let escapes = [b'\\', quote];
+    let mut bytes = text.as_bytes();
+    let Some(first_escape) = bytes.find_byteset(escapes) else {
         return Ok(Cow::Borrowed(text));
     };
-    let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     decoded.extend_from_slice(&bytes[..first_escape]);
-    let mut index = first_escape;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        index += 1;
-        if byte == quote && bytes.get(index) == Some(&quote) {
+    bytes = &bytes[first_escape..];
+    while let Some((&byte, rest)) = bytes.split_first() {
+        if byte == quote {
             decoded.push(quote);
-            index += 1;
-            continue;
+            bytes = rest.strip_prefix(&[quote]).unwrap_or(rest);
+        } else if byte == b'\\' {
+            bytes = rest;
+            decode_escape(&mut bytes, &mut decoded)?;
+        } else {
+            let end = bytes.find_byteset(escapes).unwrap_or(bytes.len());
+            decoded.extend_from_slice(&bytes[..end]);
+            bytes = &bytes[end..];
         }
-        if byte != b'\\' {
-            decoded.push(byte);
-            continue;
-        }
-        let Some(&escaped) = bytes.get(index) else {
-            return Err(Error::Parse("incomplete quoted escape".into()));
-        };
-        index += 1;
-        if escaped == b'x' {
-            let hex = bytes
-                .get(index..index + 2)
-                .ok_or_else(|| Error::Parse("incomplete hexadecimal escape".into()))?;
+    }
+    String::from_utf8(decoded)
+        .map(Cow::Owned)
+        .map_err(|_| Error::NotImplemented("non-UTF-8 type-header name".into()))
+}
+
+/// Consumes the bytes after a backslash and appends the decoded ClickHouse escape.
+fn decode_escape(bytes: &mut &[u8], decoded: &mut Vec<u8>) -> crate::Result<()> {
+    let Some((&escaped, rest)) = bytes.split_first() else {
+        return Err(Error::Parse("incomplete quoted escape".into()));
+    };
+    *bytes = rest;
+    match escaped {
+        b'x' => {
+            let Some((hex, rest)) = bytes.split_first_chunk::<2>() else {
+                return Err(Error::Parse("incomplete hexadecimal escape".into()));
+            };
             let high = char::from(hex[0]).to_digit(16);
             let low = char::from(hex[1]).to_digit(16);
             let (Some(high), Some(low)) = (high, low) else {
                 return Err(Error::Parse("invalid hexadecimal escape".into()));
             };
             decoded.push(u8::try_from(high * 16 + low).expect("two hex digits fit in u8"));
-            index += 2;
-        } else if escaped == b'N' {
-            // `\N` is ClickHouse's NULL literal; inside a quoted name it decodes to nothing.
-        } else {
-            let value = match escaped {
+            *bytes = rest;
+        }
+        // `\N` is ClickHouse's NULL literal; inside a quoted name it decodes to nothing.
+        b'N' => {}
+        byte => {
+            let value = match byte {
                 b'a' => 0x07,
                 b'b' => 0x08,
                 b'e' => 0x1b,
@@ -121,9 +134,8 @@ fn quoted(token: &str) -> crate::Result<Cow<'_, str>> {
                 b'0' => 0,
                 byte => byte,
             };
-            // ClickHouse keeps the backslash for every escape it does not recognise so that
-            // `LIKE` patterns such as `\%` and `\_` survive; quote characters, `/` (JavaScript
-            // in HTML), `=` (TSKV) and control characters are the recognised set.
+            // Preserve unknown escapes for `LIKE` patterns such as `\%` and `\_`.
+            // Quotes, `/` (JavaScript in HTML), `=` (TSKV) and controls are recognised.
             if !matches!(value, b'\\' | b'\'' | b'"' | b'`' | b'/' | b'=')
                 && !value.is_ascii_control()
             {
@@ -132,9 +144,7 @@ fn quoted(token: &str) -> crate::Result<Cow<'_, str>> {
             decoded.push(value);
         }
     }
-    String::from_utf8(decoded)
-        .map(Cow::Owned)
-        .map_err(|_| Error::NotImplemented("non-UTF-8 type-header name".into()))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -651,6 +661,21 @@ mod tests {
             Type::from_bytes(br"Enum8('\xFF' = 1)"),
             Err(crate::Error::NotImplemented(_))
         ));
+    }
+
+    #[test]
+    fn escaped_names_preserve_long_utf8_segments() {
+        let text = "日本語é".repeat(32);
+        let input =
+            format!("Tuple(`{text}\\n{text}` Enum8('{text}''\\xE6\\x97\\xA5{text}\\N' = 0))");
+        let typ = Type::from_bytes(input.as_bytes()).unwrap();
+        assert_eq!(
+            typ,
+            Type::NamedTuple(vec![Field {
+                name: format!("{text}\n{text}").into(),
+                typ: Type::Enum8(vec![(format!("{text}'日{text}").into(), 0)]),
+            }])
+        );
     }
 
     #[test]
