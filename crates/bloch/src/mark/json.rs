@@ -13,7 +13,7 @@ use crate::{Error, mark::Mark, value::Value};
 #[derive(Debug)]
 pub struct Json<'a> {
     pub(crate) paths: Box<[Cow<'a, str>]>,
-    /// One column per path, same order as `paths`.
+    // Columns follow path order so a path index also selects its values.
     pub(crate) columns: Box<[Mark<'a>]>,
     num_typed_paths: usize,
     num_rows: usize,
@@ -24,7 +24,7 @@ pub struct Json<'a> {
 #[cfg(feature = "serde1")]
 #[derive(Debug)]
 struct JsonPathNode {
-    /// `None` only for the root.
+    // The root has no path segment; every inserted child has a span.
     key: Option<KeySpan>,
     decoded_key: Option<OnceLock<String>>,
     leaf: Option<usize>,
@@ -32,8 +32,23 @@ struct JsonPathNode {
     next_sibling: Option<usize>,
 }
 
-/// One dot-separated segment of `Json::paths[path]`, located by byte range so nodes
-/// need not borrow from paths that may be `Cow::Owned`.
+#[cfg(feature = "serde1")]
+impl JsonPathNode {
+    fn key<'a>(&'a self, paths: &'a [Cow<'_, str>], decode: bool) -> &'a str {
+        let key = self
+            .key
+            .as_ref()
+            .map_or("", |span| &paths[span.path][span.bytes.clone()]);
+        if decode && let Some(decoded) = &self.decoded_key {
+            decoded.get_or_init(|| key.replace("%2E", ".")).as_str()
+        } else {
+            key
+        }
+    }
+}
+
+// Escaped paths may own their text. Store segment coordinates rather than references
+// into that text so the tree stays movable without copying each segment.
 #[cfg(feature = "serde1")]
 #[derive(Debug)]
 struct KeySpan {
@@ -99,16 +114,7 @@ impl<'a> Json<'a> {
 
     #[cfg(feature = "serde1")]
     pub(crate) fn node_key(&'a self, node: usize, decode: bool) -> &'a str {
-        let node = &self.nodes[node];
-        let key = node
-            .key
-            .as_ref()
-            .map_or("", |span| &self.paths[span.path][span.bytes.clone()]);
-        if decode && let Some(decoded) = &node.decoded_key {
-            decoded.get_or_init(|| key.replace("%2E", ".")).as_str()
-        } else {
-            key
-        }
+        self.nodes[node].key(&self.paths, decode)
     }
 
     #[cfg(feature = "serde1")]
@@ -167,8 +173,8 @@ impl<'a> Json<'a> {
 #[cfg(feature = "serde1")]
 struct PathTree<'a> {
     nodes: Vec<JsonPathNode>,
-    // Construction-only: `children` deduplicates segments while inserting; the retained
-    // `nodes` link siblings by index and read segment text through `KeySpan`.
+    // These indexes are needed only while inserting paths; discard them afterward
+    // so traversal retains neither hash tables nor borrows into owned path text.
     children: HashMap<(usize, &'a str), usize>,
     last_child: Vec<Option<usize>>,
 }

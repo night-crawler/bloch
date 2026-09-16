@@ -1,8 +1,9 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, hint::cold_path};
 use chrono_tz::{Tz, Tz::UTC};
 use crate::{Error, interval, types::{Field, Type}};
 use crate::parse::consts::{QBIT_MAX_STRIDE_GROUPS, QBIT_STRIDE_ALIGNMENT_BITS};
-use super::{enum_variants, quoted, lexer::{Kw, Tok}};
+use crate::parse::lexer::{Kw, Tok};
+use super::{enum_variants, quoted};
 
 grammar<'input>;
 
@@ -143,11 +144,11 @@ pub Type: Type<'input> = {
     "IntervalQuarter" => Type::Interval(interval::Kind::Quarter),
     "IntervalYear" => Type::Interval(interval::Kind::Year),
     "FixedString" "(" <n:Usize> ")" => Type::FixedString(n),
-    "Decimal" "(" <p:U8> "," <s:U8> ")" =>? Type::decimal(p, s).map_err(Into::into),
-    "Decimal32" "(" <s:U8> ")" =>? Type::decimal(9, s).map_err(Into::into),
-    "Decimal64" "(" <s:U8> ")" =>? Type::decimal(18, s).map_err(Into::into),
-    "Decimal128" "(" <s:U8> ")" =>? Type::decimal(38, s).map_err(Into::into),
-    "Decimal256" "(" <s:U8> ")" =>? Type::decimal(76, s).map_err(Into::into),
+    "Decimal" "(" <p:U8> "," <s:U8> ")" =>? Ok(Type::decimal(p, s)?),
+    "Decimal32" "(" <s:U8> ")" =>? Ok(Type::decimal(9, s)?),
+    "Decimal64" "(" <s:U8> ")" =>? Ok(Type::decimal(18, s)?),
+    "Decimal128" "(" <s:U8> ")" =>? Ok(Type::decimal(38, s)?),
+    "Decimal256" "(" <s:U8> ")" =>? Ok(Type::decimal(76, s)?),
     "DateTime" <tz:("(" <Timezone> ")")?> => Type::DateTime(tz.unwrap_or(UTC)),
     "DateTime64" <args:("(" <U8> <("," <Timezone>)?> ")")?> => {
         let (scale, tz) = args.unwrap_or((3, None));
@@ -163,32 +164,35 @@ pub Type: Type<'input> = {
     "Nested" "(" <fields:Comma1<Field>> ")" => Type::Nested(fields),
     "Variant" "(" <types:Comma1<Type>> ")" => Type::Variant(types),
     "Enum8" "(" <pairs:Comma1<EnumPair<I8>>> ")"
-        =>? enum_variants(pairs).map(Type::Enum8).map_err(Into::into),
+        =>? Ok(Type::Enum8(enum_variants(pairs)?)),
     "Enum16" "(" <pairs:Comma1<EnumPair<I16>>> ")"
-        =>? enum_variants(pairs).map(Type::Enum16).map_err(Into::into),
+        =>? Ok(Type::Enum16(enum_variants(pairs)?)),
     "Dynamic" <("(" "max_types" "=" NUMBER ")")?> => Type::Dynamic,
     "JSON" <args:("(" <JsonArguments> ")")?> => {
         let mut fields = args.unwrap_or_default();
         fields.sort_unstable_by(|left, right| left.name.cmp(&right.name));
         Type::Json(fields)
     },
-    // Only the storage type survives in the Native wire format.
+    // Row data uses the storage type's encoding, so function metadata is not needed to decode it.
     "SimpleAggregateFunction" "(" Word AggregateParameters? "," <t:Type> ")" => t,
-    // `SerializationAggregateFunction::serializeBinaryBulk` writes each row's state via
-    // `IAggregateFunction::serialize` with no length prefix, so the column can be neither
-    // decoded nor skipped without a per-function state layout. Reject only after the whole
-    // production has parsed so the error surfaces at any nesting depth.
+    // `IAggregateFunction::serialize` writes state without a length prefix.
+    // Without a per-function layout we cannot decode or skip it, so reject a
+    // completed production here, including when it appears inside another type.
     "AggregateFunction" "(" (U64 ",")? AggregateName AggregateParameters? AggregateTypes ")"
-        =>? Err(Error::NotImplemented("AggregateFunction state columns".into()).into()),
+        =>? {
+            cold_path();
+            Err(Error::NotImplemented("AggregateFunction state columns".into()).into())
+        },
     // Distinguish a malformed declaration (`Error::Parse`) from a valid one this reader
     // does not decode (`Error::NotImplemented`); the checks mirror `DataTypeQBit::DataTypeQBit`.
     "QBit" "(" QBitElement "," <dimension:U64> <stride:("," <U64>)?> ")" =>? {
+        cold_path();
         let stride = stride.unwrap_or(dimension);
         let byte_aligned = stride == dimension || stride % QBIT_STRIDE_ALIGNMENT_BITS == 0;
         if dimension == 0 || stride == 0 || dimension % stride != 0 || !byte_aligned
             || dimension / stride > QBIT_MAX_STRIDE_GROUPS
         {
-            Err(Error::Parse("invalid QBit dimension or stride".into()).into())
+            Err(Error::Parse(format!("invalid QBit dimension {dimension} or stride {stride}")).into())
         } else {
             Err(Error::NotImplemented("QBit columns".into()).into())
         }
@@ -208,23 +212,53 @@ Comma1<T>: Vec<T> = {
     },
 };
 
-U8: u8 = <n:NUMBER> =>? n.parse()
-    .map_err(|_| Error::Parse("number out of range".into()).into());
-Usize: usize = <n:NUMBER> =>? n.parse()
-    .map_err(|_| Error::Parse("number out of range".into()).into());
-U64: u64 = <n:NUMBER> =>? n.parse()
-    .map_err(|_| Error::Parse("number out of range".into()).into());
-I8: i8 = <n:SignedNumber> =>? n.parse()
-    .map_err(|_| Error::Parse("enum value out of range".into()).into());
-I16: i16 = <n:SignedNumber> =>? n.parse()
-    .map_err(|_| Error::Parse("enum value out of range".into()).into());
+U8: u8 = <n:NUMBER> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("number {n:?} is out of range for u8: {error}")).into())
+    },
+};
+Usize: usize = <n:NUMBER> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("number {n:?} is out of range for usize: {error}")).into())
+    },
+};
+U64: u64 = <n:NUMBER> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("number {n:?} is out of range for u64: {error}")).into())
+    },
+};
+I8: i8 = <n:SignedNumber> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("enum value {n:?} is out of range for i8: {error}")).into())
+    },
+};
+I16: i16 = <n:SignedNumber> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("enum value {n:?} is out of range for i16: {error}")).into())
+    },
+};
 
 SignedNumber: &'input str = { NUMBER, NEGATIVE };
 
-Quoted: Cow<'input, str> = <s:QUOTED> =>? quoted(s).map_err(Into::into);
-Backquoted: Cow<'input, str> = <s:BACKQUOTED> =>? quoted(s).map_err(Into::into);
-Timezone: Tz = <s:Quoted> =>? s.parse()
-    .map_err(|_| Error::Parse("unknown timezone".into()).into());
+Quoted: Cow<'input, str> = <s:QUOTED> =>? Ok(quoted(s)?);
+Backquoted: Cow<'input, str> = <s:BACKQUOTED> =>? Ok(quoted(s)?);
+Timezone: Tz = <s:Quoted> =>? match s.parse() {
+    Ok(timezone) => Ok(timezone),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("unknown timezone {s:?}: {error}")).into())
+    },
+};
 
 EnumPair<T>: (Cow<'input, str>, T) = <label:Quoted> " " "=" " " <value:T> => (label, value);
 
@@ -259,8 +293,8 @@ JsonArgument: Option<Field<'input>> = {
 };
 SkipPath: () = { Path => (), "SKIP" => (), Quoted => () };
 
-// Parameters may contain tuples, arrays, typed literals and nested calls.
-// Balance parentheses without constructing an unused parameter AST.
+// Aggregate parameters do not affect the storage decoder. Balance nested calls
+// without building a parameter AST that no consumer needs.
 AggregateName: &'input str = { OrdinaryWord, "SKIP" };
 AggregateParameters: () = "(" AggregateTokens ")" => ();
 AggregateTokens: () = {
@@ -280,9 +314,8 @@ AggregateTypes: () = {
 
 QBitElement: () = { "Int8" => (), "BFloat16" => (), "Float32" => (), "Float64" => () };
 
-// Keywords remain valid unquoted field, function and path names in their context, so
-// every keyword terminal is also a `Word`. `NUMBER` is a word because names like `1x`
-// and purely numeric JSON path segments are legal.
+// A keyword can name a field or function, and numeric names are accepted too.
+// Keep these terminals available as words so type recognition does not reserve names.
 Word: &'input str = { OrdinaryWord, NUMBER, "SKIP" };
 OrdinaryWord: &'input str = {
     WORD,

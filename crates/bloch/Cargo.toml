@@ -18,6 +18,7 @@ bstr = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 half = { workspace = true }
+hashify = { workspace = true }
 lalrpop-util = { workspace = true }
 log = { workspace = true }
 mimalloc = { workspace = true, optional = true }

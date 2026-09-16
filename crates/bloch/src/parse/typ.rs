@@ -1,10 +1,10 @@
-use std::{borrow::Cow, collections::HashSet};
+use std::{borrow::Cow, collections::HashSet, hint::cold_path};
 
 use bstr::ByteSlice as _;
 
 use crate::{Error, types::Type};
 
-mod lexer;
+use super::lexer::Lexer;
 
 lalrpop_util::lalrpop_mod!(
     #[allow(
@@ -20,57 +20,74 @@ lalrpop_util::lalrpop_mod!(
 
 impl Type<'_> {
     pub(crate) fn from_bytes(input: &[u8]) -> crate::Result<Type<'_>> {
-        let input = crate::error::decode_utf8(input)?;
-        type_header::TypeParser::new()
-            .parse(lexer::Lexer::new(input))
-            .map_err(|error| match error {
-                lalrpop_util::ParseError::User { error } => error,
-                error => Error::Parse(error.to_string()),
-            })
+        let input = match crate::error::decode_utf8(input) {
+            Ok(input) => input,
+            Err(error) => {
+                cold_path();
+                return Err(error);
+            }
+        };
+        let tokens = Lexer::new(input).map(|item| item.map(Into::into));
+        match type_header::TypeParser::new().parse(tokens) {
+            Ok(typ) => Ok(typ),
+            Err(error) => {
+                cold_path();
+                Err(match error {
+                    lalrpop_util::ParseError::User { error } => error,
+                    error => Error::Parse(error.to_string()),
+                })
+            }
+        }
     }
 
-    /// ClickHouse code: `DataTypeDecimal`. Buckets `Decimal(P, S)` by precision into the
-    /// four storage widths; `Decimal32(S)` and friends are the same buckets with a fixed `P`.
+    // Native decimal data uses a width selected by precision, not the header's alias.
+    // Normalize both spellings here so column decoding sees the same storage type.
     fn decimal(precision: u8, scale: u8) -> crate::Result<Type<'static>> {
         if scale > precision {
-            return Err(Error::Parse("decimal scale exceeds precision".into()));
+            cold_path();
+            return Err(Error::Parse(format!(
+                "decimal scale {scale} exceeds precision {precision}"
+            )));
         }
         match precision {
             0..10 => Ok(Type::Decimal32(scale)),
             10..19 => Ok(Type::Decimal64(scale)),
             19..39 => Ok(Type::Decimal128(scale)),
             39..77 => Ok(Type::Decimal256(scale)),
-            _ => Err(Error::Parse("decimal precision exceeds 76".into())),
+            _ => {
+                cold_path();
+                Err(Error::Parse(format!(
+                    "decimal precision {precision} exceeds maximum 76"
+                )))
+            }
         }
     }
 }
 
-/// ClickHouse code: `EnumValues::EnumValues` sorts values by numeric id and rejects
-/// duplicate ids and names, and `DataTypeEnum::generateName` writes them in that order.
-/// `mark::Enum8::name`/`mark::Enum16::name` binary-search `variants` by id, so the header
-/// must already satisfy the ordering.
+// Native enum headers order IDs strictly and give each label a unique ID.
+// Validate that representation before accepting it so lookups are unambiguous.
 fn enum_variants<T: PartialOrd>(
     pairs: Vec<(Cow<'_, str>, T)>,
 ) -> crate::Result<Vec<(Cow<'_, str>, T)>> {
     if !pairs.windows(2).all(|pair| pair[0].1 < pair[1].1) {
+        cold_path();
         return Err(Error::Parse(
             "enum values must be strictly increasing".into(),
         ));
     }
     if pairs.len() > 1 {
         let mut names = HashSet::with_capacity(pairs.len());
-        if pairs.iter().any(|(name, _)| !names.insert(name.as_ref())) {
-            return Err(Error::Parse("duplicate enum label".into()));
+        if let Some((name, _)) = pairs.iter().find(|(name, _)| !names.insert(name.as_ref())) {
+            cold_path();
+            return Err(Error::Parse(format!("duplicate enum label {name:?}")));
         }
     }
     Ok(pairs)
 }
 
-/// Decodes a `'…'` or `` `…` `` literal, `token` including both delimiting quotes.
-///
-/// ClickHouse code: `readAnyQuotedStringInto` (doubled quote → one quote) and
-/// `parseComplexEscapeSequence` in `src/IO/ReadHelpers.cpp`. Invalid hex digits after
-/// `\x` are rejected where ClickHouse's `unhex2` would produce garbage.
+// Names without escapes can borrow the header. Decode escaped names into owned text
+// using ClickHouse's `readAnyQuotedStringInto` and `parseComplexEscapeSequence` rules
+// so the reader sees the original name rather than its wire spelling.
 fn quoted(token: &str) -> crate::Result<Cow<'_, str>> {
     let quote = token.as_bytes()[0];
     let text = &token[1..token.len() - 1];
@@ -95,25 +112,33 @@ fn quoted(token: &str) -> crate::Result<Cow<'_, str>> {
             bytes = &bytes[end..];
         }
     }
-    String::from_utf8(decoded)
-        .map(Cow::Owned)
-        .map_err(|_| Error::NotImplemented("non-UTF-8 type-header name".into()))
+    match String::from_utf8(decoded) {
+        Ok(decoded) => Ok(Cow::Owned(decoded)),
+        Err(error) => {
+            cold_path();
+            Err(Error::NotImplemented(format!(
+                "type-header name {token:?} decodes to invalid UTF-8: {error}"
+            )))
+        }
+    }
 }
 
-/// Consumes the bytes after a backslash and appends the decoded ClickHouse escape.
 fn decode_escape(bytes: &mut &[u8], decoded: &mut Vec<u8>) -> crate::Result<()> {
     let Some((&escaped, rest)) = bytes.split_first() else {
+        cold_path();
         return Err(Error::Parse("incomplete quoted escape".into()));
     };
     *bytes = rest;
     match escaped {
         b'x' => {
             let Some((hex, rest)) = bytes.split_first_chunk::<2>() else {
+                cold_path();
                 return Err(Error::Parse("incomplete hexadecimal escape".into()));
             };
             let high = char::from(hex[0]).to_digit(16);
             let low = char::from(hex[1]).to_digit(16);
             let (Some(high), Some(low)) = (high, low) else {
+                cold_path();
                 return Err(Error::Parse("invalid hexadecimal escape".into()));
             };
             decoded.push(u8::try_from(high * 16 + low).expect("two hex digits fit in u8"));
@@ -134,8 +159,8 @@ fn decode_escape(bytes: &mut &[u8], decoded: &mut Vec<u8>) -> crate::Result<()> 
                 b'0' => 0,
                 byte => byte,
             };
-            // Preserve unknown escapes for `LIKE` patterns such as `\%` and `\_`.
-            // Quotes, `/` (JavaScript in HTML), `=` (TSKV) and controls are recognised.
+            // Unknown escapes may be meaningful to a pattern consumer (`\%`, `\_`).
+            // Keep their backslash rather than silently changing the name.
             if !matches!(value, b'\\' | b'\'' | b'"' | b'`' | b'/' | b'=')
                 && !value.is_ascii_control()
             {
@@ -465,8 +490,19 @@ mod tests {
         let Type::NamedTuple(fields) = typ else {
             panic!("expected NamedTuple, got {typ:?}");
         };
-        let names: Vec<&str> = fields.iter().map(|f| f.name.as_ref()).collect();
-        assert_eq!(names, ["_id", "name"]);
+        assert_eq!(
+            fields,
+            [
+                Field {
+                    name: "_id".into(),
+                    typ: Type::UInt64,
+                },
+                Field {
+                    name: "name".into(),
+                    typ: Type::String,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -475,15 +511,41 @@ mod tests {
         let Type::NamedTuple(fields) = typ else {
             panic!("expected NamedTuple, got {typ:?}");
         };
-        let names: Vec<&str> = fields.iter().map(|f| f.name.as_ref()).collect();
-        assert_eq!(names, ["my field", "1x", "plain"]);
+        assert_eq!(
+            fields,
+            [
+                Field {
+                    name: "my field".into(),
+                    typ: Type::UInt64,
+                },
+                Field {
+                    name: "1x".into(),
+                    typ: Type::String,
+                },
+                Field {
+                    name: "plain".into(),
+                    typ: Type::Int8,
+                },
+            ]
+        );
 
         let typ = Type::from_bytes(b"Nested(`a.b` UInt64, c String)").unwrap();
         let Type::Nested(fields) = typ else {
             panic!("expected Nested, got {typ:?}");
         };
-        let names: Vec<&str> = fields.iter().map(|f| f.name.as_ref()).collect();
-        assert_eq!(names, ["a.b", "c"]);
+        assert_eq!(
+            fields,
+            [
+                Field {
+                    name: "a.b".into(),
+                    typ: Type::UInt64,
+                },
+                Field {
+                    name: "c".into(),
+                    typ: Type::String,
+                },
+            ]
+        );
 
         assert!(Type::from_bytes(b"Tuple(`unterminated UInt64)").is_err());
     }
@@ -591,8 +653,7 @@ mod tests {
             b"DateTime64(256)",
             b"Enum8('overflow' = 128)",
             b"Enum16('underflow' = -32769)",
-            // `IDataType::getName` writes whitespace only as `, `, one space between a
-            // name and its type, ` = ` in enums and after `SKIP`/`REGEXP`.
+            // SQL-style whitespace is not canonical Native header spelling.
             b"LowCardinality( String )",
             b"Map(String,UInt8)",
             b"Tuple(a  UInt8)",
@@ -641,8 +702,16 @@ mod tests {
         let Type::Enum8(labels) = &fields[0].typ else {
             panic!("expected enum");
         };
-        let labels: Vec<&str> = labels.iter().map(|(label, _)| label.as_ref()).collect();
-        assert_eq!(labels, ["c\\d", "a'b", "x'y", "日", "\\%\\_\n\0"]);
+        assert_eq!(
+            labels,
+            &[
+                ("c\\d".into(), -2),
+                ("a'b".into(), 1),
+                ("x'y".into(), 2),
+                ("日".into(), 3),
+                ("\\%\\_\n\0".into(), 4),
+            ]
+        );
 
         for input in [
             &br"Enum8('a' = 1, '\x61' = 2)"[..],
@@ -759,15 +828,14 @@ mod tests {
             ")".repeat(MAX_TYPE_DEPTH)
         );
         assert!(Type::from_bytes(params.as_bytes()).is_err());
-        // Deep enough to overflow the stack in the recursive consumers without the guard.
+        // Reject adversarial depth before recursive consumers receive the type tree.
         assert!(Type::from_bytes(nested(100_000).as_bytes()).is_err());
     }
 
-    // The keyword list is spelled out in `lexer::keywords!`, the grammar's `extern` block
-    // and `OrdinaryWord`. A keyword missing from the latter two surfaces here.
+    // A type keyword is still a legal field name; adding a type must not reserve it.
     #[test]
     fn every_keyword_is_a_valid_field_name() {
-        for (_, keyword) in super::lexer::Kw::ALL {
+        for (_, keyword) in crate::parse::lexer::Kw::ALL {
             let header = format!("Tuple({keyword} UInt8)");
             let result = Type::from_bytes(header.as_bytes());
             let Ok(Type::NamedTuple(fields)) = result else {
