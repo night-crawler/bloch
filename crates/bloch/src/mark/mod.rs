@@ -455,7 +455,7 @@ impl<'a> Mark<'a> {
     }
 
     #[inline(always)]
-    pub(crate) const fn lc(&self) -> crate::Result<&lc::LowCardinality<'a>> {
+    pub const fn lc(&self) -> crate::Result<&lc::LowCardinality<'a>> {
         match self {
             Mark::LowCardinality(lc) => Ok(lc),
             other => {
@@ -510,7 +510,11 @@ impl<'a> Mark<'a> {
         }
     }
 
-    pub fn get_map<K, V>(&'a self, index: usize) -> crate::Result<Option<MapIterator<'a, K, V>>> {
+    pub fn get_map<K, V>(&'a self, index: usize) -> crate::Result<Option<MapIterator<'a, K, V>>>
+    where
+        K: TryFrom<Value<'a>, Error = Error>,
+        V: TryFrom<Value<'a>, Error = Error>,
+    {
         let Mark::Map(map) = self else {
             cold_path();
             return Err(Error::MismatchedType(self.as_str(), "Map"));
@@ -794,6 +798,7 @@ pub struct Decimal256<'a> {
 #[derive(Debug)]
 pub struct DateTime<'a> {
     pub(crate) tz: Tz,
+    pub(crate) explicit_tz: bool,
     pub(crate) data: ByteView<'a, DateTime32Data>,
 }
 
@@ -801,6 +806,7 @@ pub struct DateTime<'a> {
 pub struct DateTime64<'a> {
     pub(crate) precision: u8,
     pub(crate) tz: Tz,
+    pub(crate) explicit_tz: bool,
     pub(crate) data: ByteView<'a, DateTime64Data>,
 }
 

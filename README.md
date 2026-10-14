@@ -34,13 +34,26 @@ does not expose the RowBinary reader, I had to hack it to have some sort of appl
 - `bloch_derive_direct` read with try_read.
 
 ```bash
-# LTO, mimalloc, a mixture of LC strings, arrays, and dates, 100k rows
+# LTO, mimalloc, 100k profiling events: LC metadata + ~16-frame stack arrays, see benches/README.md
 # AMD Ryzen 9 7940HS
 cargo bench --bench refs --features mimalloc
-serde                   time:   [18.406 ms 18.484 ms 18.562 ms]
-bloch                    time:   [7.6797 ms 7.7583 ms 7.8431 ms]
-bloch_derive             time:   [8.1552 ms 8.2321 ms 8.3130 ms]
-bloch_derive_direct      time:   [7.1309 ms 7.1904 ms 7.2531 ms]
+serde                   time:   [37.673 ms 37.774 ms 37.876 ms]
+bloch                   time:   [13.020 ms 13.125 ms 13.253 ms]
+bloch_derive            time:   [10.185 ms 10.260 ms 10.349 ms]
+bloch_derive_direct     time:   [9.9254 ms 10.010 ms 10.112 ms]
+```
+
+Writing 1M rows of the same table (`cargo bench --bench write --features mimalloc`), 20 blocks
+of ≤65k rows, one output buffer. `native_lc` uses the `LowCardinality` layout a writer of this
+data would pick (`benchmark_sample_lc.native`: LC on the UUID, DateTime, Float64, UInt32, IPv6
+scalars and the UInt128/UInt64 frame arrays); `native_plain` keeps LC on strings only
+(`benchmark_sample.native`). RowBinary cannot express either.
+
+```
+1000000 rows: RowBinary 726662250 bytes, Native LC 165456800 bytes, Native plain 531113960 bytes
+write/rowbinary         time:   [196.94 ms 198.80 ms 201.04 ms]
+write/native_lc         time:   [630.05 ms 642.64 ms 656.89 ms]
+write/native_plain      time:   [296.76 ms 303.75 ms 315.12 ms]
 ```
 
 ## Quick start
@@ -227,7 +240,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The standalone examples crate keeps both access styles as executable tests:
+## Writing blocks
+
+Add `WriteBlock` to a `FromBlock` struct and write the generated `RowItem` values back out as an
+uncompressed `Native` block.
+
+```rust
+use bloch::parse::block::parse_single;
+use bloch::reader::{LcStr, Map};
+use bloch::{BlockWriter, FromBlock, WriteBlock};
+
+#[derive(FromBlock, WriteBlock, Copy, Clone)]
+struct Row<'a> {
+    name: LcStr<'a>,
+    attrs: Map<'a, LcStr<'a>, LcStr<'a>>,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read("testdata/activity_hw.native")?;
+    let (_, block) = parse_single(&data)?;
+
+    // `BlockWriter::for_reader(&Row::from_block(&block)?)` when a column type carries runtime
+    // parameters, e.g. a FixedString length.
+    let mut writer = BlockWriter::<RowWriter>::with_capacity(block.num_rows);
+    for row in Row::rows(&block)? {
+        let mut row = row?;
+        row.name = "rewritten";
+        writer.write(row)?;
+    }
+    // `encode` writes into any `io::Write`: a `Vec<u8>`, a `BufWriter<File>`, or a
+    // compressing encoder such as `flate2::write::GzEncoder` / `zstd::Encoder`.
+    let mut out = std::io::BufWriter::new(std::fs::File::create("rewritten.native")?);
+    writer.encode(&mut out)?;
+    std::io::Write::flush(&mut out)?;
+    Ok(())
+}
+```
+
+`WriteBlock` generates `RowWriter`, one column writer per field; a field can pick another
+writer with `#[col(writer = ...)]`, e.g. `writer::Lc<Box<str>, writer::Str, GxBuildHasher>` to hash
+`LowCardinality` dictionaries differently.
+
+Generic reader, iterator, and writer structs declare their required trait bounds on the type.
+Additional capabilities such as default column construction remain conditional on the relevant impl.
+
+`BlockWriter` is parameterized by writer storage, not the borrowed row:
+`BlockWriter<RowWriter>` accepts a fresh `RowItem<'_>` on each `write`. Built-in column writers
+retain no input borrows, so request-owned strings and source Native blocks can be dropped
+after their rows have been written. A writer can live in `Arc<Mutex<BlockWriter<RowWriter>>>`
+across requests and encoded blocks. Generic reader schemas use inferred column-writer types.
+
+`LowCardinality` writers encode each value immediately. Their dictionaries own unique
+string/byte keys; repeated values use borrowed lookups without allocating another key.
+No staging buffer retains input references. Conversion errors are returned by `write`,
+which invalidates the block; `encode` discards a failed block and resets the writer.
+Successful `encode` also resets dictionaries and retains their table and output-buffer capacities.
+
+Every reader type except `Value` (JSON/Dynamic) has a writer.
+
+More examples:
 
 - [`crates/bloch-examples/tests/procedural`](crates/bloch-examples/tests/procedural) manual parsing using generic `Value` and TryFrom
 - [`crates/bloch-examples/tests/derive`](crates/bloch-examples/tests/derive) derive macro

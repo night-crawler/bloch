@@ -12,37 +12,37 @@ pub fn consume_blocks(blocks: &[bloch::ParsedBlock<'_>]) -> TestResult<()> {
     for row in BenchmarkCols::iter_blocks(blocks) {
         let row = row?;
 
-        black_box(row.id);
-        black_box(row.lc_string_cd10);
+        black_box(row.project);
+        black_box(row.kind);
         black_box(row.timestamp);
         black_box(row.count);
-        black_box(row.some_number);
+        black_box(row.rate_hz);
 
-        black_box(row.lc_nullable_string_cd1000);
-        black_box(row.lc_nullable_string_cd5000);
-        black_box(row.lc_nullable_string_cd3000);
-        black_box(row.lc_nullable_string_cd4000);
-        black_box(row.lc_nullable_string_cd50000);
-        black_box(row.lc_nullable_string_cd100);
-        black_box(row.lc_nullable_string_cd500);
-        black_box(row.lc_nullable_string8);
-        black_box(row.lc_nullable_string_cd_00000);
+        black_box(row.host);
+        black_box(row.thread);
+        black_box(row.pod);
+        black_box(row.container);
+        black_box(row.namespace);
+        black_box(row.version);
+        black_box(row.kernel);
+        black_box(row.service);
+        black_box(row.exe);
 
-        black_box(row.some_ip_address);
+        black_box(row.host_ip);
 
-        for s in row.lc_tags {
+        for s in row.tags {
             black_box(s?);
         }
-        for s in row.nested_lc_string_cd10 {
+        for s in row.frame_kinds {
             black_box(s?);
         }
-        for &flag in row.nested_flag.try_as_slice()? {
+        for &flag in row.frame_symbolized.try_as_slice()? {
             black_box(flag);
         }
-        for v in row.nested_some_id.try_as_slice()? {
+        for v in row.frame_file_ids.try_as_slice()? {
             black_box(v.get());
         }
-        for v in row.nested_some_other_id.try_as_slice()? {
+        for v in row.frame_addrs.try_as_slice()? {
             black_box(v.get());
         }
     }

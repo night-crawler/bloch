@@ -320,7 +320,7 @@ impl<'a> Enum16<'a> {
 
 #[derive(Clone, Copy)]
 pub struct DateTime<'a> {
-    mark: &'a DateTimeMark<'a>,
+    pub(crate) mark: &'a DateTimeMark<'a>,
     // Cached only when offset is stable and doesn't mess with DST stuff.
     cached_offset: Option<chrono_tz::TzOffset>,
 }
@@ -371,7 +371,7 @@ impl DateTime<'_> {
 
 #[derive(Clone, Copy)]
 pub struct DateTime64<'a> {
-    mark: &'a DateTime64Mark<'a>,
+    pub(crate) mark: &'a DateTime64Mark<'a>,
     // Cached only when offset is stable and doesn't mess with DST stuff.
     cached_offset: Option<chrono_tz::TzOffset>,
 }

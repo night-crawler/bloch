@@ -167,7 +167,7 @@ impl<'a> TryRead<'a> for FixedBytes<'a> {
 ///
 /// [`TryFrom`] validates the complete column once.
 #[derive(Clone, Copy)]
-pub struct FixedStr<'a>(&'a FixedStringMark<'a>);
+pub struct FixedStr<'a>(pub(crate) &'a FixedStringMark<'a>);
 
 impl<'a> TryFrom<&'a Mark<'a>> for FixedStr<'a> {
     type Error = Error;
@@ -202,7 +202,7 @@ impl<'a> TryRead<'a> for FixedStr<'a> {
 /// Reads ClickHouse `FixedString` values as `&str` with trailing zero padding
 /// trimmed, without any UTF-8 validation.
 #[derive(Clone, Copy)]
-pub struct TrustedFixedStr<'a>(&'a FixedStringMark<'a>);
+pub struct TrustedFixedStr<'a>(pub(crate) &'a FixedStringMark<'a>);
 
 impl<'a> TryFrom<&'a Mark<'a>> for TrustedFixedStr<'a> {
     type Error = Error;

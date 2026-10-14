@@ -4,37 +4,38 @@ use bloch::reader::{
     Uuid,
 };
 
+/// `benchmark_sample`: a profiling event, see `testdata/benchmark_sample.sql`.
 #[derive(FromBlock, Copy, Clone)]
 pub struct BenchmarkCols<'a> {
-    pub id: Uuid<'a>,
-    pub lc_string_cd10: LcTrustedStr<'a>,
+    pub project: Uuid<'a>,
+    pub kind: LcTrustedStr<'a>,
     pub timestamp: DateTime<'a>,
     pub count: F64<'a>,
-    pub some_number: U32<'a>,
+    pub rate_hz: U32<'a>,
 
-    pub lc_nullable_string_cd1000: LcNullableTrustedStr<'a>,
-    pub lc_nullable_string_cd5000: LcNullableTrustedStr<'a>,
-    pub lc_nullable_string_cd3000: LcNullableTrustedStr<'a>,
-    pub lc_nullable_string_cd4000: LcNullableTrustedStr<'a>,
-    pub lc_nullable_string_cd50000: LcNullableTrustedStr<'a>,
-    pub lc_nullable_string_cd100: LcNullableTrustedStr<'a>,
-    pub lc_nullable_string_cd500: LcNullableTrustedStr<'a>,
+    pub host: LcNullableTrustedStr<'a>,
+    pub thread: LcNullableTrustedStr<'a>,
+    pub pod: LcNullableTrustedStr<'a>,
+    pub container: LcNullableTrustedStr<'a>,
+    pub namespace: LcNullableTrustedStr<'a>,
+    pub version: LcNullableTrustedStr<'a>,
+    pub kernel: LcNullableTrustedStr<'a>,
 
-    pub some_ip_address: Nullable<'a, Ipv6<'a>>,
+    pub host_ip: Nullable<'a, Ipv6<'a>>,
 
-    pub lc_nullable_string8: LcNullableTrustedStr<'a>,
-    pub lc_tags: Array<'a, LcTrustedStr<'a>>,
-    pub lc_nullable_string_cd_00000: LcNullableTrustedStr<'a>,
+    pub service: LcNullableTrustedStr<'a>,
+    pub tags: Array<'a, LcTrustedStr<'a>>,
+    pub exe: LcNullableTrustedStr<'a>,
 
-    #[col(name = "nested_field.lc_string_cd10")]
-    pub nested_lc_string_cd10: Array<'a, LcTrustedStr<'a>>,
+    #[col(name = "frames.kind")]
+    pub frame_kinds: Array<'a, LcTrustedStr<'a>>,
 
-    #[col(name = "nested_field.flag")]
-    pub nested_flag: Array<'a, Bool<'a>>,
+    #[col(name = "frames.symbolized")]
+    pub frame_symbolized: Array<'a, Bool<'a>>,
 
-    #[col(name = "nested_field.some_id")]
-    pub nested_some_id: Array<'a, U128<'a>>,
+    #[col(name = "frames.file_id")]
+    pub frame_file_ids: Array<'a, U128<'a>>,
 
-    #[col(name = "nested_field.some_other_id")]
-    pub nested_some_other_id: Array<'a, U64<'a>>,
+    #[col(name = "frames.addr")]
+    pub frame_addrs: Array<'a, U64<'a>>,
 }

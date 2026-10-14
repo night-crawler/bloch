@@ -51,6 +51,57 @@ pub fn date32(days: i32) -> crate::Result<NaiveDate> {
     }
 }
 
+pub fn days16(date: NaiveDate) -> crate::Result<u16> {
+    match u16::try_from((date - EPOCH_DATE).num_days()) {
+        Ok(days) => Ok(days),
+        Err(_) => {
+            cold_path();
+            Err(Error::ValueOutOfRange(
+                "NaiveDate",
+                "Date",
+                date.to_string(),
+            ))
+        }
+    }
+}
+
+pub fn days32(date: NaiveDate) -> crate::Result<i32> {
+    match i32::try_from((date - EPOCH_DATE).num_days()) {
+        Ok(days) => Ok(days),
+        Err(_) => {
+            cold_path();
+            Err(Error::ValueOutOfRange(
+                "NaiveDate",
+                "Date32",
+                date.to_string(),
+            ))
+        }
+    }
+}
+
+/// Whole ticks of `10^-precision` seconds in `total_nanos`, floored like ClickHouse stores them.
+pub fn ticks(total_nanos: i128, precision: u8, what: &'static str) -> crate::Result<i64> {
+    let Some(exp) = MAX_PRECISION.checked_sub(precision) else {
+        return Err(precision_out_of_range(precision));
+    };
+    let divisor = 10i128.pow(u32::from(exp));
+    match i64::try_from(total_nanos.div_euclid(divisor)) {
+        Ok(ticks) => Ok(ticks),
+        Err(_) => {
+            cold_path();
+            Err(Error::ValueOutOfRange(
+                what,
+                "Int64 ticks",
+                total_nanos.to_string(),
+            ))
+        }
+    }
+}
+
+pub fn total_nanos(delta: TimeDelta) -> i128 {
+    i128::from(delta.num_seconds()) * 1_000_000_000 + i128::from(delta.subsec_nanos())
+}
+
 #[inline(always)]
 pub fn datetime32(secs: u32) -> DateTime<Utc> {
     // SAFETY: every u32 timestamp is within chrono's DateTime range, and

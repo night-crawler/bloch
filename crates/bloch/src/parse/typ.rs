@@ -2,7 +2,7 @@
 use std::hint::cold_path;
 use std::str::{FromStr, from_utf8};
 
-use chrono_tz::{Tz, Tz::UTC};
+use chrono_tz::Tz;
 use nom::{
     IResult, Parser,
     branch::alt,
@@ -209,7 +209,7 @@ fn parse_datetime64(input: &[u8]) -> IResult<&[u8], Type<'_>> {
                 ws(char(')')),
             ),
         ),
-        |(precision, tz)| Type::DateTime64(precision, tz.unwrap_or(UTC)),
+        |(precision, tz)| Type::DateTime64(precision, tz),
     )
     .parse(input)
 }
@@ -221,7 +221,7 @@ fn parse_datetime_tz(input: &[u8]) -> IResult<&[u8], Type<'_>> {
             tag("DateTime"),
             delimited(ws(char('(')), quoted_tz, ws(char(')'))),
         ),
-        Type::DateTime,
+        |tz| Type::DateTime(Some(tz)),
     )
     .parse(input)
 }
@@ -262,9 +262,9 @@ fn parse_time64(input: &[u8]) -> IResult<&[u8], Type<'_>> {
 fn parse_date_primitives(input: &[u8]) -> IResult<&[u8], Type<'_>> {
     alt((
         parse_datetime64,
-        map(tag("DateTime64"), |_| Type::DateTime64(3, UTC)),
+        map(tag("DateTime64"), |_| Type::DateTime64(3, None)),
         parse_datetime_tz,
-        map(tag("DateTime"), |_| Type::DateTime(UTC)),
+        map(tag("DateTime"), |_| Type::DateTime(None)),
         map(tag("Date32"), |_| Type::Date32),
         map(tag("Date"), |_| Type::Date),
         parse_time64,
@@ -974,26 +974,26 @@ mod tests {
     #[test]
     fn datetime_forms() {
         use chrono_tz::{Asia::Tokyo, Europe::Berlin};
-        assert_eq!(Type::from_bytes(b"DateTime").unwrap(), Type::DateTime(UTC));
+        assert_eq!(Type::from_bytes(b"DateTime").unwrap(), Type::DateTime(None));
         assert_eq!(
             Type::from_bytes(b"DateTime('Europe/Berlin')").unwrap(),
-            Type::DateTime(Berlin)
+            Type::DateTime(Some(Berlin))
         );
         assert_eq!(
             Type::from_bytes(b"DateTime64").unwrap(),
-            Type::DateTime64(3, UTC)
+            Type::DateTime64(3, None)
         );
         assert_eq!(
             Type::from_bytes(b"DateTime64(6)").unwrap(),
-            Type::DateTime64(6, UTC)
+            Type::DateTime64(6, None)
         );
         assert_eq!(
             Type::from_bytes(b"DateTime64(9, 'Asia/Tokyo')").unwrap(),
-            Type::DateTime64(9, Tokyo)
+            Type::DateTime64(9, Some(Tokyo))
         );
         assert_eq!(
             Type::from_bytes(b"Nullable(DateTime64(3))").unwrap(),
-            Type::Nullable(Box::new(Type::DateTime64(3, UTC)))
+            Type::Nullable(Box::new(Type::DateTime64(3, None)))
         );
         assert!(Type::from_bytes(b"DateTime('Mars/Olympus')").is_err());
         assert!(Type::from_bytes(b"DateTime64(3, 'Mars/Olympus')").is_err());
