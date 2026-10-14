@@ -172,7 +172,12 @@ fn date32_json_conversion_checks_range() -> TestResult {
     for days in [i32::MIN, 2_932_896, i32::MAX] {
         let bytes = date32_block(days);
         let (_, block) = parse_single(&bytes)?;
-        let mark = mark::Mark::Json(mark::Json::new(vec!["d"], block.markers.into_vec(), 1, 1)?);
+        let mark = mark::Mark::Json(mark::Json::new(
+            vec!["d".into()],
+            block.markers.into_vec(),
+            1,
+            1,
+        )?);
         let result = Json::try_from(&mark)?
             .try_read(0)?
             .deserialize::<serde_json::Value>();

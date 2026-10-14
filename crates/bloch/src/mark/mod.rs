@@ -19,7 +19,7 @@ use bstr::BStr;
 use chrono::{DateTime as ChronoDateTime, TimeDelta, TimeZone};
 use chrono_tz::Tz;
 use core::fmt;
-use std::{fmt::Debug, hint::cold_path, marker::PhantomData, ops::Range};
+use std::{borrow::Cow, fmt::Debug, hint::cold_path, marker::PhantomData, ops::Range};
 use uuid::Uuid;
 
 pub enum Mark<'a> {
@@ -715,7 +715,7 @@ impl Variant<'_> {
 
 #[derive(Debug)]
 pub struct Nested<'a> {
-    pub(crate) col_names: Box<[&'a str]>,
+    pub(crate) col_names: Box<[Cow<'a, str>]>,
     pub(crate) array_of_tuples: Box<Mark<'a>>,
 }
 
@@ -731,7 +731,7 @@ impl Nested<'_> {
 
 #[derive(Debug)]
 pub struct NamedTuple<'a> {
-    pub col_names: Box<[&'a str]>,
+    pub col_names: Box<[Cow<'a, str>]>,
     pub tuple: Box<Mark<'a>>,
 }
 
@@ -822,21 +822,21 @@ impl_get_many!(
 
 #[derive(Debug)]
 pub struct Enum8<'a> {
-    pub(crate) variants: Box<[(&'a str, i8)]>,
+    pub(crate) variants: Box<[(Cow<'a, str>, i8)]>,
     pub(crate) data: ByteView<'a, i8>,
 }
 
-impl<'a> Enum8<'a> {
-    pub(crate) fn name(&self, index: usize) -> Option<&'a str> {
+impl Enum8<'_> {
+    pub(crate) fn name(&self, index: usize) -> Option<&str> {
         let id = *self.data.get(index)?;
         let slot = self
             .variants
             .binary_search_by_key(&id, |(_, id)| *id)
             .ok()?;
-        Some(self.variants[slot].0)
+        Some(self.variants[slot].0.as_ref())
     }
 
-    pub(crate) fn get(&self, index: usize) -> Option<Value<'a>> {
+    pub(crate) fn get(&self, index: usize) -> Option<Value<'_>> {
         // An undeclared id means broken data, but we trust clickhouse!
         let name = self.name(index)?;
         Some(Value::String(BStr::new(name)))
@@ -845,21 +845,21 @@ impl<'a> Enum8<'a> {
 
 #[derive(Debug)]
 pub struct Enum16<'a> {
-    pub(crate) variants: Box<[(&'a str, i16)]>,
+    pub(crate) variants: Box<[(Cow<'a, str>, i16)]>,
     pub(crate) data: ByteView<'a, zc::I16>,
 }
 
-impl<'a> Enum16<'a> {
-    pub(crate) fn name(&self, index: usize) -> Option<&'a str> {
+impl Enum16<'_> {
+    pub(crate) fn name(&self, index: usize) -> Option<&str> {
         let id = self.data.get(index)?.get();
         let slot = self
             .variants
             .binary_search_by_key(&id, |(_, id)| *id)
             .ok()?;
-        Some(self.variants[slot].0)
+        Some(self.variants[slot].0.as_ref())
     }
 
-    pub(crate) fn get(&self, index: usize) -> Option<Value<'a>> {
+    pub(crate) fn get(&self, index: usize) -> Option<Value<'_>> {
         let name = self.name(index)?;
         Some(Value::String(BStr::new(name)))
     }

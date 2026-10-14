@@ -1,4 +1,4 @@
-use std::{fmt::Debug, ops::Range};
+use std::ops::Range;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,9 +22,6 @@ pub enum Error {
 
     #[error("Utf8 decode error: {0}; bytes: {1:0x?}")]
     Utf8Decode(std::str::Utf8Error, Vec<u8>),
-
-    #[error("Nom: {0}")]
-    Nom(String),
 
     #[error("Conversion out of range: {0} for {1}, got {2}")]
     ValueOutOfRange(&'static str, &'static str, String),
@@ -52,14 +49,5 @@ pub(crate) fn decode_utf8(bytes: &[u8]) -> crate::Result<&str> {
     match std::str::from_utf8(bytes) {
         Ok(s) => Ok(s),
         Err(error) => Err(Error::Utf8Decode(error, bytes.to_vec())),
-    }
-}
-
-impl<T> From<nom::Err<T>> for Error
-where
-    T: Debug,
-{
-    fn from(value: nom::Err<T>) -> Self {
-        Self::Nom(format!("{:?}", value))
     }
 }

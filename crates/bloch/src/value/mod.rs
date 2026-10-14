@@ -10,7 +10,7 @@ use bstr::BStr;
 use chrono_tz::Tz;
 use core::{any::type_name, convert::TryFrom, hint::cold_path, marker::PhantomData};
 use half::bf16;
-use std::{net::Ipv4Addr, ops::Range};
+use std::{borrow::Cow, net::Ipv4Addr, ops::Range};
 
 macro_rules! impl_try_from_value {
     ($variant:ident, $ty:ty) => {
@@ -722,7 +722,7 @@ impl<'a> Iterator for NullableSliceIterator<'a> {
 impl ExactSizeIterator for NullableSliceIterator<'_> {}
 
 pub struct NestedIterator<'a> {
-    col_names: &'a [&'a str],
+    col_names: &'a [Cow<'a, str>],
     tuple_slice: TupleSliceIterator<'a>,
 }
 
@@ -772,7 +772,8 @@ impl<'a> Iterator for NestedIterator<'a> {
 impl ExactSizeIterator for NestedIterator<'_> {}
 
 pub struct NestedItemsIterator<'a> {
-    mark_ter: std::iter::Zip<std::slice::Iter<'a, mark::Mark<'a>>, std::slice::Iter<'a, &'a str>>,
+    mark_ter:
+        std::iter::Zip<std::slice::Iter<'a, mark::Mark<'a>>, std::slice::Iter<'a, Cow<'a, str>>>,
     row: usize,
 }
 
@@ -783,7 +784,7 @@ impl<'a> Iterator for NestedItemsIterator<'a> {
         let (mark, col_name) = self.mark_ter.next()?;
         mark.get(self.row)
             .transpose()
-            .map(|result| result.map(|value| (*col_name, value)))
+            .map(|result| result.map(|value| (col_name.as_ref(), value)))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -794,7 +795,7 @@ impl<'a> Iterator for NestedItemsIterator<'a> {
 impl ExactSizeIterator for NestedItemsIterator<'_> {}
 
 pub struct NamedTupleIterator<'a> {
-    col_names: &'a [&'a str],
+    col_names: &'a [Cow<'a, str>],
     mark: &'a mark::Tuple<'a>,
     row: usize,
 }
@@ -835,7 +836,7 @@ impl<'a> Iterator for NamedTupleIterator<'a> {
             .get(self.mark.values.len() - self.col_names.len() - 1)?;
         mark.get(self.row)
             .transpose()
-            .map(|result| result.map(|value| (*col_name, value)))
+            .map(|result| result.map(|value| (col_name.as_ref(), value)))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -891,7 +892,7 @@ impl<'a> Iterator for NamedTupleSliceIterator<'a> {
 impl ExactSizeIterator for NamedTupleSliceIterator<'_> {}
 
 pub struct NestedSliceIterator<'a> {
-    col_names: &'a [&'a str],
+    col_names: &'a [Cow<'a, str>],
     array_of_tuples: &'a mark::Mark<'a>,
     range: Range<usize>,
 }

@@ -35,11 +35,15 @@ pub use reader::{FromBlock, FromVariant};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn mark_by_name<'a, T>(col_names: &[&str], columns: &'a [T], name: &str) -> Result<&'a T> {
+fn mark_by_name<'a, T, N: AsRef<str>>(
+    col_names: &[N],
+    columns: &'a [T],
+    name: &str,
+) -> Result<&'a T> {
     let column = col_names
         .iter()
         .zip(columns)
-        .find_map(|(column_name, column)| (*column_name == name).then_some(column));
+        .find_map(|(column_name, column)| (column_name.as_ref() == name).then_some(column));
     match column {
         Some(column) => Ok(column),
         None => {

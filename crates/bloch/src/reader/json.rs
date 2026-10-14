@@ -1,3 +1,5 @@
+#[cfg(feature = "serde1")]
+use std::borrow::Cow;
 use std::{hint::cold_path, ops::Range};
 
 use super::{Readable, TryRead};
@@ -156,7 +158,7 @@ impl<'a> Iterator for JsonIterator<'a> {
             if path_index >= self.mark.paths.len() {
                 return None;
             }
-            let path = self.mark.paths[path_index];
+            let path = self.mark.paths[path_index].as_ref();
             self.path_index += 1;
 
             match self.mark.value(path_index, self.row) {
@@ -338,7 +340,7 @@ impl<'de, 'config> NodeDeserializer<'de, 'config> {
                     .node_leaf(self.node)
                     .expect("conflicting leaf has a path");
                 Err(JsonDeserializeError::StructuralConflict(
-                    self.mark.paths[path].to_owned(),
+                    self.mark.paths[path].to_string(),
                 ))
             }
             NodeState::Absent | NodeState::Object => Ok(NodeShape::Object),
@@ -1156,7 +1158,7 @@ impl<'de> MapAccess<'de> for ColumnMapAccess<'de, '_> {
 
 #[cfg(feature = "serde1")]
 struct NamedMapAccess<'de, 'config> {
-    names: &'de [&'de str],
+    names: &'de [Cow<'de, str>],
     tuple: &'de mark::Tuple<'de>,
     row: usize,
     next: usize,
@@ -1172,7 +1174,7 @@ impl<'de> MapAccess<'de> for NamedMapAccess<'de, '_> {
     where
         K: DeserializeSeed<'de>,
     {
-        let Some(&name) = self.names.get(self.next) else {
+        let Some(name) = self.names.get(self.next) else {
             return Ok(None);
         };
         if self.tuple.values.get(self.next).is_none() {
@@ -1182,7 +1184,7 @@ impl<'de> MapAccess<'de> for NamedMapAccess<'de, '_> {
         }
         self.pending = Some(self.next);
         self.next += 1;
-        match seed.deserialize(de::value::BorrowedStrDeserializer::new(name)) {
+        match seed.deserialize(de::value::BorrowedStrDeserializer::new(name.as_ref())) {
             Ok(name) => Ok(Some(name)),
             Err(error) => Err(error),
         }
@@ -1211,7 +1213,7 @@ impl<'de> MapAccess<'de> for NamedMapAccess<'de, '_> {
 
 #[cfg(feature = "serde1")]
 struct NamedRowsSeqAccess<'de, 'config> {
-    names: &'de [&'de str],
+    names: &'de [Cow<'de, str>],
     tuple: &'de mark::Tuple<'de>,
     range: Range<usize>,
     config: &'config DeserializeConfig,
@@ -1247,7 +1249,7 @@ impl<'de> SeqAccess<'de> for NamedRowsSeqAccess<'de, '_> {
 #[cfg(feature = "serde1")]
 #[derive(Clone, Copy)]
 struct NamedRowDeserializer<'de, 'config> {
-    names: &'de [&'de str],
+    names: &'de [Cow<'de, str>],
     tuple: &'de mark::Tuple<'de>,
     row: usize,
     config: &'config DeserializeConfig,
@@ -1451,7 +1453,7 @@ mod serde_tests {
     #[test]
     fn rejects_active_conflicting_paths() -> TestResult {
         let mark = mark::Mark::Json(mark::Json::new(
-            vec!["a", "a.b"],
+            vec!["a".into(), "a.b".into()],
             vec![
                 mark::Mark::String(string_view(vec!["x"])),
                 mark::Mark::String(string_view(vec!["y"])),
@@ -1487,7 +1489,7 @@ mod serde_tests {
             })
             .collect();
         let mark = mark::Mark::Json(mark::Json::new(
-            paths.iter().map(String::as_str).collect(),
+            paths.iter().map(|path| path.as_str().into()).collect(),
             columns,
             0,
             3,
@@ -1528,7 +1530,7 @@ mod serde_tests {
         }
 
         let nested_json = mark::Json::new(
-            vec!["name"],
+            vec!["name".into()],
             vec![mark::Mark::String(string_view(vec!["one", "two", "three"]))],
             1,
             3,
@@ -1543,7 +1545,7 @@ mod serde_tests {
             offsets: ByteView::try_from(outer_offsets.as_slice())?,
             values: Box::new(inner),
         });
-        let mark = mark::Mark::Json(mark::Json::new(vec!["items"], vec![outer], 1, 1)?);
+        let mark = mark::Mark::Json(mark::Json::new(vec!["items".into()], vec![outer], 1, 1)?);
 
         let actual: Root<'_> = Json::try_from(&mark)?.try_read(0)?.deserialize()?;
         assert_eq!(
@@ -1569,7 +1571,7 @@ mod serde_tests {
         let signed = i64::MIN.to_le_bytes();
         let unsigned = u64::MAX.to_le_bytes();
         let mark = mark::Mark::Json(mark::Json::new(
-            vec!["signed", "unsigned"],
+            vec!["signed".into(), "unsigned".into()],
             vec![
                 mark::Mark::Int64(ByteView::try_from(signed.as_slice())?),
                 mark::Mark::UInt64(ByteView::try_from(unsigned.as_slice())?),
@@ -1598,7 +1600,13 @@ mod serde_tests {
         let decimal_bytes = 12_345_i64.to_le_bytes();
         let datetime_bytes = 0_u32.to_le_bytes();
         let formatted = mark::Mark::Json(mark::Json::new(
-            vec!["date", "ip", "uuid", "decimal", "datetime"],
+            vec![
+                "date".into(),
+                "ip".into(),
+                "uuid".into(),
+                "decimal".into(),
+                "datetime".into(),
+            ],
             vec![
                 mark::Mark::Date(ByteView::try_from(date_days.as_slice())?),
                 mark::Mark::Ipv4(ByteView::<Ipv4Data>::try_from(address_bytes.as_slice())?),
@@ -1653,7 +1661,7 @@ mod serde_tests {
         assert_eq!(format_wide_number([0_u8; 32], true, 76).as_str(), "0");
 
         let mark = mark::Mark::Json(mark::Json::new(
-            vec!["i", "u", "d"],
+            vec!["i".into(), "u".into(), "d".into()],
             vec![
                 mark::Mark::Int256(ByteView::try_from(i256_min.as_slice())?),
                 mark::Mark::UInt256(ByteView::try_from(u256_max.as_slice())?),
@@ -1675,7 +1683,7 @@ mod serde_tests {
 
         let array_offsets = 1_u64.to_le_bytes();
         let array_mark = mark::Mark::Json(mark::Json::new(
-            vec!["i_array", "u_array", "d_array"],
+            vec!["i_array".into(), "u_array".into(), "d_array".into()],
             vec![
                 mark::Mark::Array(mark::Array {
                     offsets: ByteView::try_from(array_offsets.as_slice())?,
@@ -1748,7 +1756,7 @@ mod serde_tests {
                 num_rows: 1,
             }),
             mark::Mark::NamedTuple(mark::NamedTuple {
-                col_names: vec!["x"].into(),
+                col_names: vec!["x".into()].into(),
                 tuple: Box::new(mark::Mark::Tuple(mark::Tuple {
                     values: vec![mark::Mark::UInt64(ByteView::try_from(
                         named_value.as_slice(),
@@ -1758,7 +1766,7 @@ mod serde_tests {
                 })),
             }),
             mark::Mark::Nested(mark::Nested {
-                col_names: vec!["name"].into(),
+                col_names: vec!["name".into()].into(),
                 array_of_tuples: Box::new(mark::Mark::Array(mark::Array {
                     offsets: ByteView::try_from(nested_offsets.as_slice())?,
                     values: Box::new(mark::Mark::Tuple(mark::Tuple {
@@ -1780,7 +1788,15 @@ mod serde_tests {
         ];
         let mark = mark::Mark::Json(mark::Json::new(
             vec![
-                "nullable", "null", "lc", "map", "tuple", "named", "nested", "variant", "dynamic",
+                "nullable".into(),
+                "null".into(),
+                "lc".into(),
+                "map".into(),
+                "tuple".into(),
+                "named".into(),
+                "nested".into(),
+                "variant".into(),
+                "dynamic".into(),
             ],
             marks,
             9,

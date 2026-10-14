@@ -1,4 +1,4 @@
-use std::hint::cold_path;
+use std::{borrow::Cow, hint::cold_path};
 
 use crate::mark::BoolView;
 use crate::zc;
@@ -8,7 +8,6 @@ use crate::{
         DateTime, DateTime64, Decimal32, Decimal64, Decimal128, Decimal256, Enum8, Enum16,
         FixedString, Interval, Mark, Time64,
     },
-    parse::typ::parse_type,
     slice::ByteView,
 };
 pub use chrono_tz::Tz;
@@ -99,7 +98,7 @@ pub struct DynamicHeader<'a> {
 
 #[derive(Debug)]
 pub struct JsonHeader<'a> {
-    pub(crate) paths: Vec<&'a str>,
+    pub(crate) paths: Vec<Cow<'a, str>>,
     pub(crate) col_headers: Vec<JsonColumnHeader<'a>>,
 }
 
@@ -242,8 +241,8 @@ pub enum Type<'a> {
     /// Ring, MultiPoint. New geo types are appended, never sorted in.
     Geometry,
 
-    Enum8(Vec<(&'a str, i8)>),
-    Enum16(Vec<(&'a str, i16)>),
+    Enum8(Vec<(Cow<'a, str>, i8)>),
+    Enum16(Vec<(Cow<'a, str>, i16)>),
 
     LowCardinality(Box<Type<'a>>),
 
@@ -387,34 +386,6 @@ impl<'a> Type<'a> {
         }
     }
 
-    pub(crate) fn from_bytes(s: &[u8]) -> Result<Type<'_>, crate::Error> {
-        // `SerializationAggregateFunction::serializeBinaryBulk` writes each row's state via
-        // `IAggregateFunction::serialize` with no length prefix, so the column can be neither
-        // decoded nor skipped without a per-function state layout.
-        if s.starts_with(b"AggregateFunction(") {
-            cold_path();
-            return Err(crate::Error::NotImplemented(format!(
-                "aggregate function state column {}",
-                String::from_utf8_lossy(s)
-            )));
-        }
-        let (remainder, typ) = match parse_type(s) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                cold_path();
-                return Err(crate::Error::Parse(e.to_string()));
-            }
-        };
-        if !remainder.trim_ascii().is_empty() {
-            cold_path();
-            return Err(crate::Error::Parse(format!(
-                "Unparsed remainder: {remainder:?}"
-            )));
-        }
-
-        Ok(typ)
-    }
-
     pub(crate) fn into_fixed_size_marker(self, data: &'a [u8]) -> crate::Result<Mark<'a>> {
         let mark = match self {
             Type::Bool => Mark::Bool(BoolView { data }),
@@ -509,6 +480,6 @@ pub enum JsonColumnHeader<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Field<'a> {
-    pub(crate) name: &'a str,
+    pub(crate) name: Cow<'a, str>,
     pub(crate) typ: Type<'a>,
 }

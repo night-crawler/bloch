@@ -1,8 +1,10 @@
+use std::borrow::Cow;
 #[cfg(not(feature = "serde1"))]
 use std::collections::HashSet;
 #[cfg(feature = "serde1")]
 use std::{
     collections::{HashMap, hash_map::Entry},
+    ops::Range,
     sync::OnceLock,
 };
 
@@ -10,28 +12,53 @@ use crate::{Error, mark::Mark, value::Value};
 
 #[derive(Debug)]
 pub struct Json<'a> {
-    pub(crate) paths: Box<[&'a str]>,
-    /// One column per path, same order as `paths`.
+    pub(crate) paths: Box<[Cow<'a, str>]>,
+    // Columns follow path order so a path index also selects its values.
     pub(crate) columns: Box<[Mark<'a>]>,
     num_typed_paths: usize,
     num_rows: usize,
     #[cfg(feature = "serde1")]
-    nodes: Box<[JsonPathNode<'a>]>,
+    nodes: Box<[JsonPathNode]>,
 }
 
 #[cfg(feature = "serde1")]
 #[derive(Debug)]
-struct JsonPathNode<'a> {
-    key: &'a str,
+struct JsonPathNode {
+    // The root has no path segment; every inserted child has a span.
+    key: Option<KeySpan>,
     decoded_key: Option<OnceLock<String>>,
     leaf: Option<usize>,
     first_child: Option<usize>,
     next_sibling: Option<usize>,
 }
 
+#[cfg(feature = "serde1")]
+impl JsonPathNode {
+    fn key<'a>(&'a self, paths: &'a [Cow<'_, str>], decode: bool) -> &'a str {
+        let key = self
+            .key
+            .as_ref()
+            .map_or("", |span| &paths[span.path][span.bytes.clone()]);
+        if decode && let Some(decoded) = &self.decoded_key {
+            decoded.get_or_init(|| key.replace("%2E", ".")).as_str()
+        } else {
+            key
+        }
+    }
+}
+
+// Escaped paths may own their text. Store segment coordinates rather than references
+// into that text so the tree stays movable without copying each segment.
+#[cfg(feature = "serde1")]
+#[derive(Debug)]
+struct KeySpan {
+    path: usize,
+    bytes: Range<usize>,
+}
+
 impl<'a> Json<'a> {
     pub(crate) fn new(
-        paths: Vec<&'a str>,
+        paths: Vec<Cow<'a, str>>,
         columns: Vec<Mark<'a>>,
         num_typed_paths: usize,
         rows: usize,
@@ -47,8 +74,8 @@ impl<'a> Json<'a> {
         #[cfg(not(feature = "serde1"))]
         {
             let mut unique_paths = HashSet::with_capacity(paths.len());
-            for &path in &paths {
-                if !unique_paths.insert(path) {
+            for path in &paths {
+                if !unique_paths.insert(path.as_ref()) {
                     return Err(Error::CorruptedData(format!(
                         "duplicate JSON path {path:?}"
                     )));
@@ -87,14 +114,7 @@ impl<'a> Json<'a> {
 
     #[cfg(feature = "serde1")]
     pub(crate) fn node_key(&'a self, node: usize, decode: bool) -> &'a str {
-        let node = &self.nodes[node];
-        if decode && let Some(decoded) = &node.decoded_key {
-            decoded
-                .get_or_init(|| node.key.replace("%2E", "."))
-                .as_str()
-        } else {
-            node.key
-        }
+        self.nodes[node].key(&self.paths, decode)
     }
 
     #[cfg(feature = "serde1")]
@@ -152,8 +172,9 @@ impl<'a> Json<'a> {
 
 #[cfg(feature = "serde1")]
 struct PathTree<'a> {
-    nodes: Vec<JsonPathNode<'a>>,
-    // Construction-only metadata; the retained nodes only need traversal links.
+    nodes: Vec<JsonPathNode>,
+    // These indexes are needed only while inserting paths; discard them afterward
+    // so traversal retains neither hash tables nor borrows into owned path text.
     children: HashMap<(usize, &'a str), usize>,
     last_child: Vec<Option<usize>>,
 }
@@ -165,7 +186,7 @@ impl<'a> PathTree<'a> {
     fn new() -> Self {
         Self {
             nodes: vec![JsonPathNode {
-                key: "",
+                key: None,
                 decoded_key: None,
                 leaf: None,
                 first_child: None,
@@ -178,8 +199,18 @@ impl<'a> PathTree<'a> {
 
     fn insert_path(&mut self, path_index: usize, path: &'a str) -> crate::Result<()> {
         let mut parent = Self::ROOT;
+        let mut start = 0;
         for key in path.split('.') {
-            parent = self.child(parent, key);
+            let end = start + key.len();
+            parent = self.child(
+                parent,
+                KeySpan {
+                    path: path_index,
+                    bytes: start..end,
+                },
+                key,
+            );
+            start = end + '.'.len_utf8();
         }
 
         if self.nodes[parent].leaf.replace(path_index).is_some() {
@@ -193,13 +224,13 @@ impl<'a> PathTree<'a> {
     // Every new node is assigned `nodes.len()` as its index before any of its own
     // children can be created, so a child's index always exceeds its parent's — callers
     // may process `nodes` in reverse to resolve every child before its parent.
-    fn child(&mut self, parent: usize, key: &'a str) -> usize {
+    fn child(&mut self, parent: usize, span: KeySpan, key: &'a str) -> usize {
         match self.children.entry((parent, key)) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 let index = self.nodes.len();
                 self.nodes.push(JsonPathNode {
-                    key,
+                    key: Some(span),
                     decoded_key: key.contains("%2E").then(OnceLock::new),
                     leaf: None,
                     first_child: None,
@@ -227,7 +258,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_raw_paths() {
         let result = Json::new(
-            vec!["nested.key", "other", "nested.key"],
+            vec!["nested.key".into(), "other".into(), "nested.key".into()],
             vec![Mark::Nothing(1), Mark::Nothing(1), Mark::Nothing(1)],
             1,
             1,
@@ -237,7 +268,10 @@ mod tests {
 
     #[test]
     fn accepts_prefix_paths_in_either_order() {
-        for paths in [vec!["a", "a.b"], vec!["a.b", "a"]] {
+        for paths in [
+            vec!["a".into(), "a.b".into()],
+            vec!["a.b".into(), "a".into()],
+        ] {
             let json = Json::new(paths, vec![Mark::Nothing(1), Mark::Empty], 2, 1).unwrap();
             assert!(matches!(json.value(0, 0).unwrap(), Some(Value::Empty)));
             assert!(json.value(1, 0).unwrap().is_none());
@@ -257,7 +291,10 @@ mod tests {
             result
         }
 
-        let paths = vec!["z.b", "a.b", "z.a", "z", "a.c", "m", "a.b.d"];
+        let paths = ["z.b", "a.b", "z.a", "z", "a.c", "m", "a.b.d"]
+            .into_iter()
+            .map(Cow::Borrowed)
+            .collect::<Vec<_>>();
         let columns = paths.iter().map(|_| Mark::Nothing(1)).collect();
         let json = Json::new(paths, columns, 7, 1).unwrap();
 

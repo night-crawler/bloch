@@ -6,6 +6,7 @@ pub mod block;
 pub(crate) mod column;
 pub mod consts;
 pub(crate) mod header;
+mod lexer;
 pub(crate) mod typ;
 
 pub(crate) type IResult<I, O, E = Error> = Result<(I, O), E>;

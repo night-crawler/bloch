@@ -18,15 +18,19 @@ bstr = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 half = { workspace = true }
+hashify = { workspace = true }
+lalrpop-util = { workspace = true }
 log = { workspace = true }
 mimalloc = { workspace = true, optional = true }
-nom = { workspace = true }
 paste = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 zerocopy = { workspace = true }
+
+[build-dependencies]
+lalrpop = { workspace = true }
 
 [dev-dependencies]
 clickhouse = { workspace = true }

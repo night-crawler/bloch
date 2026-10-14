@@ -1,650 +1,185 @@
-/// Deliberately doesn't support escaping because it's pain in `derive` and pain in general.
-use std::hint::cold_path;
-use std::str::{FromStr, from_utf8};
+use std::{borrow::Cow, collections::HashSet, hint::cold_path};
 
-use chrono_tz::{Tz, Tz::UTC};
-use nom::{
-    IResult, Parser,
-    branch::alt,
-    bytes::complete::{tag, take_while, take_while1},
-    character::complete::{char, digit1, multispace0, multispace1},
-    combinator::{map, map_res, opt, recognize, verify},
-    error::{ErrorKind, FromExternalError as _, ParseError},
-    multi::{separated_list0, separated_list1},
-    sequence::{delimited, pair, preceded, separated_pair},
-};
+use bstr::ByteSlice as _;
 
-use crate::interval;
-use crate::types::{Field, Type};
+use crate::{Error, types::Type};
 
-const TIME64_DEFAULT_SCALE: u8 = 3;
+use super::lexer::Lexer;
 
-fn parse_num<T>(input: &[u8]) -> Result<T, nom::error::Error<&[u8]>>
-where
-    T: FromStr,
-{
-    let s = match from_utf8(input) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(nom::error::Error::from_external_error(
-                input,
-                ErrorKind::Fail,
-                e,
-            ));
+lalrpop_util::lalrpop_mod!(
+    #[allow(
+        unused_imports,
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::restriction
+    )]
+    type_header,
+    "/parse/type_header.rs"
+);
+
+impl Type<'_> {
+    pub(crate) fn from_bytes(input: &[u8]) -> crate::Result<Type<'_>> {
+        let input = match crate::error::decode_utf8(input) {
+            Ok(input) => input,
+            Err(error) => {
+                cold_path();
+                return Err(error);
+            }
+        };
+        let tokens = Lexer::new(input).map(|item| item.map(Into::into));
+        match type_header::TypeParser::new().parse(tokens) {
+            Ok(typ) => Ok(typ),
+            Err(error) => {
+                cold_path();
+                Err(match error {
+                    lalrpop_util::ParseError::User { error } => error,
+                    error => Error::Parse(error.to_string()),
+                })
+            }
         }
-    };
-    match s.parse::<T>() {
-        Ok(parsed) => Ok(parsed),
-        Err(e) => Err(nom::error::Error::from_external_error(
-            input,
-            ErrorKind::Fail,
-            e,
-        )),
-    }
-}
-
-fn ws<'a, O, E, F>(inner: F) -> impl Parser<&'a [u8], Output = O, Error = E>
-where
-    E: ParseError<&'a [u8]>,
-    F: Parser<&'a [u8], Output = O, Error = E>,
-{
-    delimited(multispace0, inner, multispace0)
-}
-
-fn parse_decimal_type(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    let (input, (precision, scale)) = preceded(
-        tag("Decimal"),
-        delimited(
-            ws(char('(')),
-            separated_pair(
-                map_res(digit1, parse_num::<u8>),
-                ws(char(',')),
-                map_res(digit1, parse_num::<u8>),
-            ),
-            ws(char(')')),
-        ),
-    )
-    .parse(input)?;
-
-    if scale > precision {
-        cold_path();
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            ErrorKind::Fail,
-        )));
     }
 
-    let typ = match precision {
-        0..10 => Type::Decimal32(scale),
-        10..19 => Type::Decimal64(scale),
-        19..39 => Type::Decimal128(scale),
-        39..77 => Type::Decimal256(scale),
-        _ => {
+    // Native decimal data uses a width selected by precision, not the header's alias.
+    // Normalize both spellings here so column decoding sees the same storage type.
+    fn decimal(precision: u8, scale: u8) -> crate::Result<Type<'static>> {
+        if scale > precision {
             cold_path();
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                ErrorKind::Fail,
+            return Err(Error::Parse(format!(
+                "decimal scale {scale} exceeds precision {precision}"
             )));
         }
-    };
-
-    Ok((input, typ))
-}
-
-/// `Decimal32(S)` | `Decimal64(S)` | `Decimal128(S)` | `Decimal256(S)`: the precision is the
-/// type's maximum (`createExact` in `DataTypesDecimal.cpp`), so `S` is the only argument and must
-/// not exceed it. `NativeWriter` normalizes these to `Decimal(P, S)`, so they only appear in
-/// hand-written type strings.
-fn parse_decimal_sized<'a>(input: &'a [u8]) -> IResult<&'a [u8], Type<'a>> {
-    type Ctor<'a> = fn(u8) -> Type<'a>;
-    let (input, (ctor, max_precision)) = preceded(
-        tag("Decimal"),
-        alt((
-            map(tag("32"), |_| (Type::Decimal32 as Ctor<'a>, 9)),
-            map(tag("64"), |_| (Type::Decimal64 as Ctor<'a>, 18)),
-            map(tag("128"), |_| (Type::Decimal128 as Ctor<'a>, 38)),
-            map(tag("256"), |_| (Type::Decimal256 as Ctor<'a>, 76)),
-        )),
-    )
-    .parse(input)?;
-
-    let (input, scale) = delimited(
-        ws(char('(')),
-        map_res(digit1, parse_num::<u8>),
-        ws(char(')')),
-    )
-    .parse(input)?;
-
-    if scale > max_precision {
-        cold_path();
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            ErrorKind::Fail,
-        )));
+        match precision {
+            0..10 => Ok(Type::Decimal32(scale)),
+            10..19 => Ok(Type::Decimal64(scale)),
+            19..39 => Ok(Type::Decimal128(scale)),
+            39..77 => Ok(Type::Decimal256(scale)),
+            _ => {
+                cold_path();
+                Err(Error::Parse(format!(
+                    "decimal precision {precision} exceeds maximum 76"
+                )))
+            }
+        }
     }
-
-    Ok((input, ctor(scale)))
 }
 
-fn parse_string(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(tag("String"), |_| Type::String).parse(input)
+// Native enum headers order IDs strictly and give each label a unique ID.
+// Validate that representation before accepting it so lookups are unambiguous.
+fn enum_variants<T: PartialOrd>(
+    pairs: Vec<(Cow<'_, str>, T)>,
+) -> crate::Result<Vec<(Cow<'_, str>, T)>> {
+    if !pairs.windows(2).all(|pair| pair[0].1 < pair[1].1) {
+        cold_path();
+        return Err(Error::Parse(
+            "enum values must be strictly increasing".into(),
+        ));
+    }
+    if pairs.len() > 1 {
+        let mut names = HashSet::with_capacity(pairs.len());
+        if let Some((name, _)) = pairs.iter().find(|(name, _)| !names.insert(name.as_ref())) {
+            cold_path();
+            return Err(Error::Parse(format!("duplicate enum label {name:?}")));
+        }
+    }
+    Ok(pairs)
 }
 
-fn parse_fixed_string(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("FixedString"),
-            delimited(
-                ws(char('(')),
-                map_res(digit1, |s: &[u8]| parse_num::<usize>(s)),
-                ws(char(')')),
-            ),
-        ),
-        Type::FixedString,
-    )
-    .parse(input)
-}
-
-fn parse_int_primitives(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        map(tag("UUID"), |_| Type::Uuid),
-        map(tag("Bool"), |_| Type::Bool),
-        map(tag("UInt256"), |_| Type::UInt256),
-        map(tag("Int256"), |_| Type::Int256),
-        map(tag("UInt128"), |_| Type::UInt128),
-        map(tag("Int128"), |_| Type::Int128),
-        map(tag("UInt64"), |_| Type::UInt64),
-        map(tag("Int64"), |_| Type::Int64),
-        map(tag("UInt32"), |_| Type::UInt32),
-        map(tag("Int32"), |_| Type::Int32),
-        map(tag("UInt16"), |_| Type::UInt16),
-        map(tag("Int16"), |_| Type::Int16),
-        map(tag("UInt8"), |_| Type::UInt8),
-        map(tag("Int8"), |_| Type::Int8),
-    ))
-    .parse(input)
-}
-
-fn parse_float_primitives(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        map(tag("Float64"), |_| Type::Float64),
-        map(tag("Float32"), |_| Type::Float32),
-        map(tag("BFloat16"), |_| Type::BFloat16),
-    ))
-    .parse(input)
-}
-
-fn parse_inet_primitives(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        map(tag("IPv6"), |_| Type::Ipv6),
-        map(tag("IPv4"), |_| Type::Ipv4),
-    ))
-    .parse(input)
-}
-
-/// `'Europe/Berlin'` -> [`Tz`]
-fn quoted_tz(input: &[u8]) -> IResult<&[u8], Tz> {
-    map_res(
-        delimited(ws(char('\'')), take_while1(|c| c != b'\''), ws(char('\''))),
-        |tz: &[u8]| {
-            // SAFETY: I hope caller validated the input as UTF-8 before parsing
-            Tz::from_str(unsafe { std::str::from_utf8_unchecked(tz) })
-                .map_err(|_| nom::error::Error::new(tz, ErrorKind::Fail))
-        },
-    )
-    .parse(input)
-}
-
-/// `DateTime64(N)` or `DateTime64(N, 'tz')`
-fn parse_datetime64(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("DateTime64"),
-            delimited(
-                ws(char('(')),
-                pair(
-                    map_res(digit1, parse_num::<u8>),
-                    opt(preceded(ws(char(',')), quoted_tz)),
-                ),
-                ws(char(')')),
-            ),
-        ),
-        |(precision, tz)| Type::DateTime64(precision, tz.unwrap_or(UTC)),
-    )
-    .parse(input)
-}
-
-/// `DateTime('tz')`
-fn parse_datetime_tz(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("DateTime"),
-            delimited(ws(char('(')), quoted_tz, ws(char(')'))),
-        ),
-        Type::DateTime,
-    )
-    .parse(input)
-}
-
-fn parse_tuple(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("Tuple"),
-            delimited(
-                ws(char('(')),
-                // `SELECT tuple()` case
-                // so not separated_list1
-                separated_list0(ws(char(',')), parse_type),
-                ws(char(')')),
-            ),
-        ),
-        Type::Tuple,
-    )
-    .parse(input)
-}
-
-/// `Time64(P)`; `DataTypeTime64` rejects a timezone argument, so none is parsed.
-fn parse_time64(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("Time64"),
-            delimited(
-                ws(char('(')),
-                map_res(digit1, parse_num::<u8>),
-                ws(char(')')),
-            ),
-        ),
-        Type::Time64,
-    )
-    .parse(input)
-}
-
-fn parse_date_primitives(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        parse_datetime64,
-        map(tag("DateTime64"), |_| Type::DateTime64(3, UTC)),
-        parse_datetime_tz,
-        map(tag("DateTime"), |_| Type::DateTime(UTC)),
-        map(tag("Date32"), |_| Type::Date32),
-        map(tag("Date"), |_| Type::Date),
-        parse_time64,
-        map(tag("Time64"), |_| Type::Time64(TIME64_DEFAULT_SCALE)),
-        map(tag("Time"), |_| Type::Time),
-    ))
-    .parse(input)
-}
-
-fn parse_geo_primitives(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        map(tag("LineString"), |_| Type::LineString),
-        map(tag("MultiLineString"), |_| Type::MultiLineString),
-        map(tag("MultiPolygon"), |_| Type::MultiPolygon),
-        map(tag("MultiPoint"), |_| Type::MultiPoint),
-        map(tag("Polygon"), |_| Type::Polygon),
-        map(tag("Ring"), |_| Type::Ring),
-        map(tag("Point"), |_| Type::Point),
-        map(tag("Geometry"), |_| Type::Geometry),
-    ))
-    .parse(input)
-}
-
-fn parse_json_path(input: &[u8]) -> IResult<&[u8], &[u8]> {
-    alt((
-        delimited(char('`'), take_while1(|c| c != b'`'), char('`')),
-        take_while1(|c: u8| !c.is_ascii_whitespace() && c != b',' && c != b')'),
-    ))
-    .parse(input)
-}
-
-fn parse_json_setting(input: &[u8]) -> IResult<&[u8], Option<Field<'_>>> {
-    map(
-        pair(
-            alt((tag("max_dynamic_paths"), tag("max_dynamic_types"))),
-            preceded(ws(char('=')), digit1),
-        ),
-        |_| None,
-    )
-    .parse(input)
-}
-
-fn parse_json_skip(input: &[u8]) -> IResult<&[u8], Option<Field<'_>>> {
-    map(
-        preceded(
-            alt((tag("SKIP REGEXP"), tag("SKIP"))),
-            preceded(
-                multispace1,
-                alt((
-                    delimited(char('\''), take_while1(|c| c != b'\''), char('\'')),
-                    parse_json_path,
-                )),
-            ),
-        ),
-        |_| None,
-    )
-    .parse(input)
-}
-
-fn parse_json_typed_path(input: &[u8]) -> IResult<&[u8], Option<Field<'_>>> {
-    map(
-        separated_pair(parse_json_path, multispace1, parse_type),
-        |(name, typ)| {
-            Some(Field {
-                name: unsafe { std::str::from_utf8_unchecked(name) },
-                typ,
-            })
-        },
-    )
-    .parse(input)
-}
-
-fn parse_json(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    let (input, arguments) = preceded(
-        tag("JSON"),
-        opt(delimited(
-            ws(char('(')),
-            separated_list0(
-                ws(char(',')),
-                alt((parse_json_setting, parse_json_skip, parse_json_typed_path)),
-            ),
-            ws(char(')')),
-        )),
-    )
-    .parse(input)?;
-
-    let mut typed_paths = match arguments {
-        Some(arguments) => arguments.into_iter().flatten().collect::<Vec<_>>(),
-        None => Vec::new(),
+// Names without escapes can borrow the header. Decode escaped names into owned text
+// using ClickHouse's `readAnyQuotedStringInto` and `parseComplexEscapeSequence` rules
+// so the reader sees the original name rather than its wire spelling.
+fn quoted(token: &str) -> crate::Result<Cow<'_, str>> {
+    let quote = token.as_bytes()[0];
+    let text = &token[1..token.len() - 1];
+    let escapes = [b'\\', quote];
+    let mut bytes = text.as_bytes();
+    let Some(first_escape) = bytes.find_byteset(escapes) else {
+        return Ok(Cow::Borrowed(text));
     };
-    typed_paths.sort_unstable_by_key(|field| field.name);
-    Ok((input, Type::Json(typed_paths)))
+    let mut decoded = Vec::with_capacity(bytes.len());
+    decoded.extend_from_slice(&bytes[..first_escape]);
+    bytes = &bytes[first_escape..];
+    while let Some((&byte, rest)) = bytes.split_first() {
+        if byte == quote {
+            decoded.push(quote);
+            bytes = rest.strip_prefix(&[quote]).unwrap_or(rest);
+        } else if byte == b'\\' {
+            bytes = rest;
+            decode_escape(&mut bytes, &mut decoded)?;
+        } else {
+            let end = bytes.find_byteset(escapes).unwrap_or(bytes.len());
+            decoded.extend_from_slice(&bytes[..end]);
+            bytes = &bytes[end..];
+        }
+    }
+    match String::from_utf8(decoded) {
+        Ok(decoded) => Ok(Cow::Owned(decoded)),
+        Err(error) => {
+            cold_path();
+            Err(Error::NotImplemented(format!(
+                "type-header name {token:?} decodes to invalid UTF-8: {error}"
+            )))
+        }
+    }
 }
 
-fn parse_other_primitives(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        // `Dynamic` | `Dynamic(max_types=32)` -> Type::Dynamic
-        map(
-            pair(
-                tag("Dynamic"),
-                opt(delimited(
-                    ws(char('(')),
-                    pair(tag("max_types"), preceded(ws(char('=')), digit1)),
-                    ws(char(')')),
-                )),
-            ),
-            |_| Type::Dynamic,
-        ),
-        map(tag("SharedVariant"), |_| Type::SharedVariant),
-        map(tag("Nothing"), |_| Type::Nothing),
-    ))
-    .parse(input)
-}
-
-fn parse_interval(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("Interval"),
-            alt((
-                map(tag("Nanosecond"), |_| interval::Kind::Nanosecond),
-                map(tag("Microsecond"), |_| interval::Kind::Microsecond),
-                map(tag("Millisecond"), |_| interval::Kind::Millisecond),
-                map(tag("Second"), |_| interval::Kind::Second),
-                map(tag("Minute"), |_| interval::Kind::Minute),
-                map(tag("Hour"), |_| interval::Kind::Hour),
-                map(tag("Day"), |_| interval::Kind::Day),
-                map(tag("Week"), |_| interval::Kind::Week),
-                map(tag("Month"), |_| interval::Kind::Month),
-                map(tag("Quarter"), |_| interval::Kind::Quarter),
-                map(tag("Year"), |_| interval::Kind::Year),
-            )),
-        ),
-        Type::Interval,
-    )
-    .parse(input)
-}
-
-fn parse_primitive_type(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        parse_string,
-        parse_int_primitives,
-        parse_float_primitives,
-        parse_fixed_string,
-        parse_date_primitives,
-        parse_inet_primitives,
-        parse_interval,
-        parse_geo_primitives,
-    ))
-    .parse(input)
-}
-
-fn parse_nullable(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("Nullable"),
-            delimited(ws(char('(')), parse_type, ws(char(')'))),
-        ),
-        |inner| Type::Nullable(Box::new(inner)),
-    )
-    .parse(input)
-}
-
-fn parse_map(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("Map"),
-            delimited(
-                ws(char('(')),
-                separated_pair(parse_type, ws(char(',')), parse_type),
-                ws(char(')')),
-            ),
-        ),
-        |(k, v)| Type::Map(Box::new(k), Box::new(v)),
-    )
-    .parse(input)
-}
-
-fn parse_array(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("Array"),
-            delimited(ws(char('(')), parse_type, ws(char(')'))),
-        ),
-        |inner| Type::Array(Box::new(inner)),
-    )
-    .parse(input)
-}
-
-fn parse_variant(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("Variant"),
-            delimited(
-                ws(char('(')),
-                separated_list1(ws(char(',')), parse_type),
-                ws(char(')')),
-            ),
-        ),
-        Type::Variant,
-    )
-    .parse(input)
-}
-
-fn parse_lowcardinality(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        preceded(
-            tag("LowCardinality"),
-            delimited(ws(char('(')), parse_type, ws(char(')'))),
-        ),
-        |inner| Type::LowCardinality(Box::new(inner)),
-    )
-    .parse(input)
-}
-
-/// `SimpleAggregateFunction(f, T)` | `SimpleAggregateFunction(f(params), T)` -> `T`.
-fn parse_simple_aggregate_function(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    // `DataTypeCustomSimpleAggregateFunction` is a custom name over `T`, serialized as `T`
-    // (`create()` in `DataTypeCustomSimpleAggregateFunction.cpp` builds a `DataTypeCustomDesc`
-    // with a null serialization), so nothing of `f` or `params` survives into the wire format.
-    preceded(
-        tag("SimpleAggregateFunction"),
-        delimited(
-            ws(char('(')),
-            preceded(
-                pair(
-                    take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_'),
-                    // Every parametric function in `checkSupportedFunctions` (`groupArray*`,
-                    // `groupUniqArray*`) takes numeric literals only, so no `)` can occur inside.
-                    opt(delimited(
-                        ws(char('(')),
-                        take_while1(|c| c != b')'),
-                        ws(char(')')),
-                    )),
-                ),
-                // Every function in `checkSupportedFunctions` is unary: exactly one `T`.
-                preceded(ws(char(',')), parse_type),
-            ),
-            ws(char(')')),
-        ),
-    )
-    .parse(input)
-}
-
-fn parse_named_tuple(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    let (input, fields) = parse_pairs("Tuple", input)?;
-    let fields = map_fields(fields);
-
-    Ok((input, Type::NamedTuple(fields)))
-}
-
-fn parse_nested(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    let (input, pairs) = parse_pairs("Nested", input)?;
-    let fields = map_fields(pairs);
-
-    Ok((input, Type::Nested(fields)))
-}
-
-fn map_fields<'a>(pairs: Vec<(&'a [u8], Type<'a>)>) -> Vec<Field<'a>> {
-    pairs
-        .into_iter()
-        .map(|(name, typ)| Field {
-            name: unsafe { std::str::from_utf8_unchecked(name) },
-            typ,
-        })
-        .collect::<Vec<_>>()
-}
-
-fn parse_identifier(input: &[u8]) -> IResult<&[u8], &[u8]> {
-    alt((
-        delimited(char('`'), take_while1(|c| c != b'`'), char('`')),
-        take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_'),
-    ))
-    .parse(input)
-}
-
-fn parse_pairs<'a>(
-    name: &'static str,
-    input: &'a [u8],
-) -> IResult<&'a [u8], Vec<(&'a [u8], Type<'a>)>> {
-    let (input, pairs) = preceded(
-        tag(name),
-        delimited(
-            ws(char('(')),
-            separated_list1(
-                ws(char(',')),
-                separated_pair(parse_identifier, multispace1, parse_type),
-            ),
-            ws(char(')')),
-        ),
-    )
-    .parse(input)?;
-
-    Ok((input, pairs))
-}
-
-fn parse_enum_variants<'a, T>(
-    name: &'static str,
-    input: &'a [u8],
-) -> IResult<&'a [u8], Vec<(&'a str, T)>>
-where
-    T: FromStr + PartialOrd,
-{
-    map(
-        verify(
-            preceded(
-                tag(name),
-                delimited(
-                    ws(char('(')),
-                    separated_list1(
-                        ws(char(',')),
-                        separated_pair(
-                            ws(delimited(
-                                char('\''),
-                                take_while(|c| c != b'\''),
-                                char('\''),
-                            )),
-                            ws(char('=')),
-                            map_res(recognize(pair(opt(char('-')), digit1)), parse_num::<T>),
-                        ),
-                    ),
-                    ws(char(')')),
-                ),
-            ),
-            |pairs: &Vec<(&[u8], T)>| pairs.windows(2).all(|w| w[0].1 < w[1].1),
-        ),
-        |pairs| {
-            pairs
-                .into_iter()
-                .map(|(name, id)| (unsafe { std::str::from_utf8_unchecked(name) }, id))
-                .collect()
-        },
-    )
-    .parse(input)
-}
-
-fn parse_enum8(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        |input| parse_enum_variants::<i8>("Enum8", input),
-        Type::Enum8,
-    )
-    .parse(input)
-}
-
-fn parse_enum16(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    map(
-        |input| parse_enum_variants::<i16>("Enum16", input),
-        Type::Enum16,
-    )
-    .parse(input)
-}
-
-pub fn parse_type(input: &[u8]) -> IResult<&[u8], Type<'_>> {
-    alt((
-        parse_lowcardinality,
-        parse_nullable,
-        parse_primitive_type,
-        parse_array,
-        parse_map,
-        parse_tuple,
-        parse_decimal_type,
-        parse_decimal_sized,
-        parse_variant,
-        parse_nested,
-        parse_named_tuple,
-        parse_enum8,
-        parse_enum16,
-        parse_json,
-        parse_other_primitives,
-        parse_simple_aggregate_function,
-    ))
-    .parse(input)
+fn decode_escape(bytes: &mut &[u8], decoded: &mut Vec<u8>) -> crate::Result<()> {
+    let Some((&escaped, rest)) = bytes.split_first() else {
+        cold_path();
+        return Err(Error::Parse("incomplete quoted escape".into()));
+    };
+    *bytes = rest;
+    match escaped {
+        b'x' => {
+            let Some((hex, rest)) = bytes.split_first_chunk::<2>() else {
+                cold_path();
+                return Err(Error::Parse("incomplete hexadecimal escape".into()));
+            };
+            let high = char::from(hex[0]).to_digit(16);
+            let low = char::from(hex[1]).to_digit(16);
+            let (Some(high), Some(low)) = (high, low) else {
+                cold_path();
+                return Err(Error::Parse("invalid hexadecimal escape".into()));
+            };
+            decoded.push(u8::try_from(high * 16 + low).expect("two hex digits fit in u8"));
+            *bytes = rest;
+        }
+        // `\N` is ClickHouse's NULL literal; inside a quoted name it decodes to nothing.
+        b'N' => {}
+        byte => {
+            let value = match byte {
+                b'a' => 0x07,
+                b'b' => 0x08,
+                b'e' => 0x1b,
+                b'f' => 0x0c,
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'v' => 0x0b,
+                b'0' => 0,
+                byte => byte,
+            };
+            // Unknown escapes may be meaningful to a pattern consumer (`\%`, `\_`).
+            // Keep their backslash rather than silently changing the name.
+            if !matches!(value, b'\\' | b'\'' | b'"' | b'`' | b'/' | b'=')
+                && !value.is_ascii_control()
+            {
+                decoded.push(b'\\');
+            }
+            decoded.push(value);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::types::{Field, Type};
+    use chrono_tz::Tz::UTC;
     #[test]
     fn decimal() {
         let input = b"Decimal(9, 9)";
-        let (_, typ) = parse_decimal_type(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(typ, Type::Decimal32(9));
     }
 
@@ -653,27 +188,27 @@ mod tests {
         for (input, expected) in [
             (&b"Decimal32(3)"[..], Type::Decimal32(3)),
             (b"Decimal64(18)", Type::Decimal64(18)),
-            (b"Decimal128( 10 )", Type::Decimal128(10)),
+            (b"Decimal128(10)", Type::Decimal128(10)),
             (b"Decimal256(76)", Type::Decimal256(76)),
             (
                 b"Nullable(Decimal32(0))",
                 Type::Nullable(Box::new(Type::Decimal32(0))),
             ),
         ] {
-            let (rest, typ) = parse_type(input).unwrap();
-            assert!(rest.is_empty(), "{}", String::from_utf8_lossy(input));
+            let typ = Type::from_bytes(input).unwrap();
+
             assert_eq!(typ, expected, "{}", String::from_utf8_lossy(input));
         }
     }
 
     #[test]
     fn decimal_sized_scale_exceeds_max_precision() {
-        assert!(parse_decimal_sized(b"Decimal32(10)").is_err());
-        assert!(parse_decimal_sized(b"Decimal64(19)").is_err());
-        assert!(parse_decimal_sized(b"Decimal128(39)").is_err());
-        assert!(parse_decimal_sized(b"Decimal256(77)").is_err());
+        assert!(Type::from_bytes(b"Decimal32(10)").is_err());
+        assert!(Type::from_bytes(b"Decimal64(19)").is_err());
+        assert!(Type::from_bytes(b"Decimal128(39)").is_err());
+        assert!(Type::from_bytes(b"Decimal256(77)").is_err());
         // `Decimal32(P, S)` is not a ClickHouse type: `Decimal32` takes the scale only.
-        assert!(parse_decimal_sized(b"Decimal32(9, 3)").is_err());
+        assert!(Type::from_bytes(b"Decimal32(9, 3)").is_err());
     }
 
     #[test]
@@ -682,15 +217,15 @@ mod tests {
             (&b"Time"[..], Type::Time),
             (b"Time64", Type::Time64(3)),
             (b"Time64(0)", Type::Time64(0)),
-            (b"Time64( 9 )", Type::Time64(9)),
+            (b"Time64(9)", Type::Time64(9)),
             (b"Array(Time)", Type::Array(Box::new(Type::Time))),
             (
                 b"Nullable(Time64(6))",
                 Type::Nullable(Box::new(Type::Time64(6))),
             ),
         ] {
-            let (rest, typ) = parse_type(input).unwrap();
-            assert!(rest.is_empty(), "{}", String::from_utf8_lossy(input));
+            let typ = Type::from_bytes(input).unwrap();
+
             assert_eq!(typ, expected, "{}", String::from_utf8_lossy(input));
         }
     }
@@ -703,36 +238,36 @@ mod tests {
             (b"Geometry", Type::Geometry),
             (b"Array(Geometry)", Type::Array(Box::new(Type::Geometry))),
         ] {
-            let (rest, typ) = parse_type(input).unwrap();
-            assert!(rest.is_empty(), "{}", String::from_utf8_lossy(input));
+            let typ = Type::from_bytes(input).unwrap();
+
             assert_eq!(typ, expected, "{}", String::from_utf8_lossy(input));
         }
     }
 
     #[test]
     fn decimal_scale_exceeds_precision() {
-        assert!(parse_decimal_type(b"Decimal(9, 10)").is_err());
-        assert!(parse_decimal_type(b"Decimal(18, 30)").is_err());
-        assert!(parse_decimal_type(b"Decimal(38, 40)").is_err());
+        assert!(Type::from_bytes(b"Decimal(9, 10)").is_err());
+        assert!(Type::from_bytes(b"Decimal(18, 30)").is_err());
+        assert!(Type::from_bytes(b"Decimal(38, 40)").is_err());
     }
 
     #[test]
     fn decimal_precision_out_of_range() {
-        assert!(parse_decimal_type(b"Decimal(77, 0)").is_err());
+        assert!(Type::from_bytes(b"Decimal(77, 0)").is_err());
     }
 
     #[test]
     fn int64() {
         let input = b"Int64";
-        let result = parse_int_primitives(input);
+        let result = Type::from_bytes(input);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().1, Type::Int64);
+        assert_eq!(result.unwrap(), Type::Int64);
     }
 
     #[test]
     fn map() {
         let input = b"Map(Int32, String)";
-        let (_, typ) = parse_map(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(
             typ,
             Type::Map(Box::new(Type::Int32), Box::new(Type::String))
@@ -742,7 +277,7 @@ mod tests {
     #[test]
     fn map_nullable() {
         let input = b"Map(Int32, Nullable(LowCardinality(String)))";
-        let (_, typ) = parse_map(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(
             typ,
             Type::Map(
@@ -757,14 +292,14 @@ mod tests {
     #[test]
     fn array() {
         let input = b"Array(Int32)";
-        let (_, typ) = parse_array(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(typ, Type::Array(Box::new(Type::Int32)));
     }
 
     #[test]
     fn variant() {
         let input = b"Variant(Array(UInt64), String, UInt64)";
-        let (_, typ) = parse_variant(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(
             typ,
             Type::Variant(vec![
@@ -780,10 +315,10 @@ mod tests {
         for input in [
             &b"Dynamic"[..],
             b"Dynamic(max_types=0)",
-            b"Dynamic(max_types = 5)",
+            b"Dynamic(max_types=255)",
         ] {
-            let (rest, typ) = parse_type(input).unwrap();
-            assert!(rest.is_empty(), "{}", String::from_utf8_lossy(input));
+            let typ = Type::from_bytes(input).unwrap();
+
             assert_eq!(typ, Type::Dynamic);
         }
     }
@@ -791,20 +326,20 @@ mod tests {
     #[test]
     fn array_nested() {
         let input = b"Array(Nested(child_id UInt64, child_name String, scores Array(UInt32)))";
-        let (_, typ) = parse_type(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(
             typ,
             Type::Array(Box::new(Type::Nested(vec![
                 Field {
-                    name: "child_id",
+                    name: "child_id".into(),
                     typ: Type::UInt64
                 },
                 Field {
-                    name: "child_name",
+                    name: "child_name".into(),
                     typ: Type::String
                 },
                 Field {
-                    name: "scores",
+                    name: "scores".into(),
                     typ: Type::Array(Box::new(Type::UInt32))
                 }
             ])))
@@ -814,24 +349,24 @@ mod tests {
     #[test]
     fn array_named_tuple() {
         let input = b"Array(Tuple(kind String, agent_symbols Bool, file_or_func_id UInt128, addr_or_line UInt64))";
-        let (_, typ) = parse_type(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(
             typ,
             Type::Array(Box::new(Type::NamedTuple(vec![
                 Field {
-                    name: "kind",
+                    name: "kind".into(),
                     typ: Type::String
                 },
                 Field {
-                    name: "agent_symbols",
+                    name: "agent_symbols".into(),
                     typ: Type::Bool
                 },
                 Field {
-                    name: "file_or_func_id",
+                    name: "file_or_func_id".into(),
                     typ: Type::UInt128
                 },
                 Field {
-                    name: "addr_or_line",
+                    name: "addr_or_line".into(),
                     typ: Type::UInt64
                 },
             ])))
@@ -841,57 +376,76 @@ mod tests {
     #[test]
     fn enum8() {
         let input = b"Enum8('Red' = 1, 'Green' = 2, 'Blue' = 3)";
-        let (_, typ) = parse_type(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(
             typ,
-            Type::Enum8(vec![("Red", 1), ("Green", 2), ("Blue", 3)])
+            Type::Enum8(vec![
+                ("Red".into(), 1),
+                ("Green".into(), 2),
+                ("Blue".into(), 3)
+            ])
         );
     }
 
     #[test]
     fn enum16() {
         let input = b"Enum16('Foo' = 1000, 'Bar' = 2000)";
-        let (_, typ) = parse_type(input).unwrap();
-        assert_eq!(typ, Type::Enum16(vec![("Foo", 1000), ("Bar", 2000)]));
+        let typ = Type::from_bytes(input).unwrap();
+        assert_eq!(
+            typ,
+            Type::Enum16(vec![("Foo".into(), 1000), ("Bar".into(), 2000)])
+        );
     }
 
     #[test]
     fn enum16_negative() {
         let input = b"Enum16('Min' = -32768, 'Neg' = -5000, 'Pos' = 5000)";
-        let (_, typ) = parse_type(input).unwrap();
+        let typ = Type::from_bytes(input).unwrap();
         assert_eq!(
             typ,
-            Type::Enum16(vec![("Min", -32768), ("Neg", -5000), ("Pos", 5000)])
+            Type::Enum16(vec![
+                ("Min".into(), -32768),
+                ("Neg".into(), -5000),
+                ("Pos".into(), 5000)
+            ])
         );
     }
 
     #[test]
     fn enum_rejects_unsorted_or_duplicate_ids() {
-        assert!(parse_type(b"Enum8('B' = 2, 'A' = 1)").is_err());
-        assert!(parse_type(b"Enum16('A' = 1, 'B' = 1)").is_err());
-        assert!(parse_type(b"Enum8('Blue' = -23, 'Green' = 2, 'Red' = 11)").is_ok());
+        assert!(Type::from_bytes(b"Enum8('B' = 2, 'A' = 1)").is_err());
+        assert!(Type::from_bytes(b"Enum16('A' = 1, 'B' = 1)").is_err());
+        assert!(Type::from_bytes(b"Enum8('Blue' = -23, 'Green' = 2, 'Red' = 11)").is_ok());
     }
 
     #[test]
     fn enum_empty_name() {
-        let (_, typ) = parse_type(b"Enum8('' = 0, 'a' = 1)").unwrap();
-        assert_eq!(typ, Type::Enum8(vec![("", 0), ("a", 1)]));
+        let typ = Type::from_bytes(b"Enum8('' = 0, 'a' = 1)").unwrap();
+        assert_eq!(typ, Type::Enum8(vec![("".into(), 0), ("a".into(), 1)]));
     }
 
     #[test]
-    fn enum_label_whitespace() {
+    fn enum_label_whitespace_is_preserved() {
         for (input, expected) in [
             (
-                &b"Enum8( ' leading' = 1, 'trailing ' = 2, ' \t ' = 3 )"[..],
-                Type::Enum8(vec![(" leading", 1), ("trailing ", 2), (" \t ", 3)]),
+                &b"Enum8(' leading' = 1, 'trailing ' = 2, ' \t ' = 3)"[..],
+                Type::Enum8(vec![
+                    (" leading".into(), 1),
+                    ("trailing ".into(), 2),
+                    (" \t ".into(), 3),
+                ]),
             ),
             (
-                &b"Enum16( ' leading' = 1, 'trailing ' = 2, ' \t ' = 3 )"[..],
-                Type::Enum16(vec![(" leading", 1), ("trailing ", 2), (" \t ", 3)]),
+                &b"Enum16(' leading' = 1, 'trailing ' = 2, ' \t ' = 3)"[..],
+                Type::Enum16(vec![
+                    (" leading".into(), 1),
+                    ("trailing ".into(), 2),
+                    (" \t ".into(), 3),
+                ]),
             ),
         ] {
-            let (rest, typ) = parse_type(input).unwrap();
-            assert!(rest.is_empty());
+            let typ = Type::from_bytes(input).unwrap();
+
             assert_eq!(typ, expected);
         }
     }
@@ -907,11 +461,11 @@ mod tests {
             typ,
             Type::Json(vec![
                 Field {
-                    name: "a",
+                    name: "a".into(),
                     typ: Type::UInt64,
                 },
                 Field {
-                    name: "nested.name",
+                    name: "nested.name".into(),
                     typ: Type::String,
                 },
             ])
@@ -936,8 +490,19 @@ mod tests {
         let Type::NamedTuple(fields) = typ else {
             panic!("expected NamedTuple, got {typ:?}");
         };
-        let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
-        assert_eq!(names, ["_id", "name"]);
+        assert_eq!(
+            fields,
+            [
+                Field {
+                    name: "_id".into(),
+                    typ: Type::UInt64,
+                },
+                Field {
+                    name: "name".into(),
+                    typ: Type::String,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -946,15 +511,41 @@ mod tests {
         let Type::NamedTuple(fields) = typ else {
             panic!("expected NamedTuple, got {typ:?}");
         };
-        let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
-        assert_eq!(names, ["my field", "1x", "plain"]);
+        assert_eq!(
+            fields,
+            [
+                Field {
+                    name: "my field".into(),
+                    typ: Type::UInt64,
+                },
+                Field {
+                    name: "1x".into(),
+                    typ: Type::String,
+                },
+                Field {
+                    name: "plain".into(),
+                    typ: Type::Int8,
+                },
+            ]
+        );
 
         let typ = Type::from_bytes(b"Nested(`a.b` UInt64, c String)").unwrap();
         let Type::Nested(fields) = typ else {
             panic!("expected Nested, got {typ:?}");
         };
-        let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
-        assert_eq!(names, ["a.b", "c"]);
+        assert_eq!(
+            fields,
+            [
+                Field {
+                    name: "a.b".into(),
+                    typ: Type::UInt64,
+                },
+                Field {
+                    name: "c".into(),
+                    typ: Type::String,
+                },
+            ]
+        );
 
         assert!(Type::from_bytes(b"Tuple(`unterminated UInt64)").is_err());
     }
@@ -1001,6 +592,201 @@ mod tests {
     }
 
     #[test]
+    fn keywords_remain_names_without_confusing_positional_tuples() {
+        assert_eq!(
+            Type::from_bytes(b"Tuple(String, Array(UInt8), Tuple())").unwrap(),
+            Type::Tuple(vec![
+                Type::String,
+                Type::Array(Box::new(Type::UInt8)),
+                Type::Tuple(vec![]),
+            ])
+        );
+        assert_eq!(
+            Type::from_bytes(b"Tuple(String UInt8, Array String, SKIP Bool)").unwrap(),
+            Type::NamedTuple(vec![
+                Field {
+                    name: "String".into(),
+                    typ: Type::UInt8
+                },
+                Field {
+                    name: "Array".into(),
+                    typ: Type::String
+                },
+                Field {
+                    name: "SKIP".into(),
+                    typ: Type::Bool
+                },
+            ])
+        );
+        assert_eq!(
+            Type::from_bytes(
+                b"JSON(SKIP String, SKIP REGEXP '^secret', String UInt8, `SKIP` Bool)"
+            )
+            .unwrap(),
+            Type::Json(vec![
+                Field {
+                    name: "SKIP".into(),
+                    typ: Type::Bool
+                },
+                Field {
+                    name: "String".into(),
+                    typ: Type::UInt8
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_type_boundaries() {
+        for input in [
+            &b"StringSuffix"[..],
+            b"Array(UInt8",
+            b"Tuple(UInt8,)",
+            b"Tuple(name UInt8, String)",
+            b"Variant()",
+            b"Nested()",
+            b"Enum8()",
+            b"Tuple(`name`UInt8)",
+            b"JSON(`path`UInt8)",
+            b"Time64(3, 'UTC')",
+            b"FixedString(18446744073709551616)",
+            b"DateTime64(256)",
+            b"Enum8('overflow' = 128)",
+            b"Enum16('underflow' = -32769)",
+            // SQL-style whitespace is not canonical Native header spelling.
+            b"LowCardinality( String )",
+            b"Map(String,UInt8)",
+            b"Tuple(a  UInt8)",
+            b"Tuple(a\tUInt8)",
+            b"Enum8('a'=1)",
+            b"Enum8('a' =1)",
+            b"Dynamic(max_types = 5)",
+            b"JSON(SKIP  a)",
+            b" String",
+            b"String ",
+        ] {
+            assert!(Type::from_bytes(input).is_err(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn borrows_utf8_names_and_rejects_invalid_utf8() {
+        let input = String::from("Tuple(`café` String, UInt8 Enum8('日本語' = 1))");
+        let Type::NamedTuple(fields) = Type::from_bytes(input.as_bytes()).unwrap() else {
+            panic!("expected named tuple");
+        };
+        assert_eq!(fields[0].name, "café");
+        assert_eq!(fields[0].name.as_ptr(), input[7..].as_ptr());
+        let name_start = input.find("UInt8").unwrap();
+        assert_eq!(fields[1].name.as_ptr(), input[name_start..].as_ptr());
+        let Type::Enum8(labels) = &fields[1].typ else {
+            panic!("expected enum");
+        };
+        assert_eq!(labels, &[("日本語".into(), 1)]);
+        let label_start = input.find("日本語").unwrap();
+        assert_eq!(labels[0].0.as_ptr(), input[label_start..].as_ptr());
+        assert!(matches!(
+            Type::from_bytes(b"Tuple(`\xff` UInt8)"),
+            Err(crate::Error::Utf8Decode(..))
+        ));
+    }
+
+    #[test]
+    fn decodes_clickhouse_escapes_in_quoted_names() {
+        let input = br"Tuple(`a\`b` Enum8('c\\d' = -2, 'a\'b' = 1, 'x''y' = 2, '\xE6\x97\xA5' = 3, '\%\_\N\n\0' = 4))";
+        let typ = Type::from_bytes(input).unwrap();
+        let Type::NamedTuple(fields) = typ else {
+            panic!("expected named tuple");
+        };
+        assert_eq!(fields[0].name, "a`b");
+        let Type::Enum8(labels) = &fields[0].typ else {
+            panic!("expected enum");
+        };
+        assert_eq!(
+            labels,
+            &[
+                ("c\\d".into(), -2),
+                ("a'b".into(), 1),
+                ("x'y".into(), 2),
+                ("日".into(), 3),
+                ("\\%\\_\n\0".into(), 4),
+            ]
+        );
+
+        for input in [
+            &br"Enum8('a' = 1, '\x61' = 2)"[..],
+            br"Enum8('\x0' = 1)",
+            br"Enum8('unterminated\' = 1)",
+            br"Tuple(`unterminated\` UInt8)",
+            br"Tuple(`a`UInt8)",
+        ] {
+            assert!(
+                matches!(Type::from_bytes(input), Err(crate::Error::Parse(_))),
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
+        assert!(matches!(
+            Type::from_bytes(br"Enum8('\xFF' = 1)"),
+            Err(crate::Error::NotImplemented(_))
+        ));
+    }
+
+    #[test]
+    fn escaped_names_preserve_long_utf8_segments() {
+        let text = "日本語é".repeat(32);
+        let input =
+            format!("Tuple(`{text}\\n{text}` Enum8('{text}''\\xE6\\x97\\xA5{text}\\N' = 0))");
+        let typ = Type::from_bytes(input.as_bytes()).unwrap();
+        assert_eq!(
+            typ,
+            Type::NamedTuple(vec![Field {
+                name: format!("{text}\n{text}").into(),
+                typ: Type::Enum8(vec![(format!("{text}'日{text}").into(), 0)]),
+            }])
+        );
+    }
+
+    #[test]
+    fn aggregate_function_and_qbit_are_not_implemented_at_any_depth() {
+        for input in [
+            &b"AggregateFunction(count)"[..],
+            b"Array(AggregateFunction(sum, UInt64))",
+            b"Tuple(x String, state AggregateFunction(1, quantiles(0.5, 0.9), UInt64))",
+            b"Map(String, AggregateFunction(sum, UInt64))",
+            b"JSON(state AggregateFunction(sum, UInt64))",
+            br"AggregateFunction(f((1, 2), tuple('a\'b'), [1, 2], 0.5::Float64), UInt64)",
+            b"Array(Nullable(QBit(Float32, 3)))",
+            b"Tuple(QBit(Int8, 16, 8))",
+            b"QBit(BFloat16, 8)",
+        ] {
+            assert!(
+                matches!(
+                    Type::from_bytes(input),
+                    Err(crate::Error::NotImplemented(_))
+                ),
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
+        for input in [
+            &b"AggregateFunction(sum, UInt64"[..],
+            b"AggregateFunction(1,)",
+            b"AggregateFunction(f((1, 2), UInt64)",
+            b"QBit(String, 3)",
+            b"QBit(Float32, 0)",
+            b"QBit(Float32, 16, 3)",
+            b"QBit(Float32, 16, 32)",
+        ] {
+            assert!(
+                matches!(Type::from_bytes(input), Err(crate::Error::Parse(_))),
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
     fn simple_aggregate_function_is_its_storage_type() {
         assert_eq!(
             Type::from_bytes(b"SimpleAggregateFunction(sum, UInt64)").unwrap(),
@@ -1021,5 +807,41 @@ mod tests {
         );
         assert!(Type::from_bytes(b"SimpleAggregateFunction(sum)").is_err());
         assert!(Type::from_bytes(b"SimpleAggregateFunction('sum', UInt64)").is_err());
+    }
+
+    #[test]
+    fn nesting_depth_is_bounded_like_clickhouse() {
+        use crate::parse::consts::MAX_TYPE_DEPTH;
+
+        let nested = |depth: usize| {
+            let mut s = "Array(".repeat(depth);
+            s.push_str("UInt8");
+            s.push_str(&")".repeat(depth));
+            s
+        };
+        assert!(Type::from_bytes(nested(MAX_TYPE_DEPTH).as_bytes()).is_ok());
+        assert!(Type::from_bytes(nested(MAX_TYPE_DEPTH + 1).as_bytes()).is_err());
+        // Parameter parentheses count too: the limit is total nesting, not type nesting.
+        let params = format!(
+            "SimpleAggregateFunction(f{}{}, UInt8)",
+            "(".repeat(MAX_TYPE_DEPTH),
+            ")".repeat(MAX_TYPE_DEPTH)
+        );
+        assert!(Type::from_bytes(params.as_bytes()).is_err());
+        // Reject adversarial depth before recursive consumers receive the type tree.
+        assert!(Type::from_bytes(nested(100_000).as_bytes()).is_err());
+    }
+
+    // A type keyword is still a legal field name; adding a type must not reserve it.
+    #[test]
+    fn every_keyword_is_a_valid_field_name() {
+        for (_, keyword) in crate::parse::lexer::Kw::ALL {
+            let header = format!("Tuple({keyword} UInt8)");
+            let result = Type::from_bytes(header.as_bytes());
+            let Ok(Type::NamedTuple(fields)) = result else {
+                panic!("{header}: {result:?}");
+            };
+            assert_eq!(fields[0].name, *keyword);
+        }
     }
 }

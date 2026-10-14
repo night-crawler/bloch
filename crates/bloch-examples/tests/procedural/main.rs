@@ -1,7 +1,6 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-mod aggregate_function_state_is_not_implemented;
 mod array_in_array_in64;
 mod array_json_dynamic_path_sorting_after_another_dynamic_path;
 mod array_json_dynamic_path_sorting_before_another_dynamic_path;

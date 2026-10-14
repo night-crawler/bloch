@@ -319,8 +319,10 @@ fn json<'a>(
     let (input, shared_data_offsets) =
         take_elements(input, num_rows, 8, "JSON shared data offsets")?;
     if shared_data_offsets
-        .chunks_exact(8)
-        .any(|offset| offset != [0; 8])
+        .iter()
+        .copied()
+        .fold(0u8, |combined, byte| combined | byte)
+        != 0
     {
         cold_path();
         return Err(Error::NotImplemented(

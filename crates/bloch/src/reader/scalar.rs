@@ -267,7 +267,7 @@ impl<'a> Enum8<'a> {
                 "invalid Enum8 discriminant: {variant}"
             )));
         };
-        Ok(self.0.variants[pos].0)
+        Ok(self.0.variants[pos].0.as_ref())
     }
 }
 
@@ -314,7 +314,7 @@ impl<'a> Enum16<'a> {
                 "invalid Enum16 discriminant: {variant}"
             )));
         };
-        Ok(self.0.variants[pos].0)
+        Ok(self.0.variants[pos].0.as_ref())
     }
 }
 

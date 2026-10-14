@@ -16,9 +16,11 @@ bstr = "1"
 chrono = "0.4"
 chrono-tz = "0.10"
 half = { version = "2.6", features = ["zerocopy"] }
+hashify = "0.3.1"
+lalrpop = { version = "0.23.1", default-features = false }
+lalrpop-util = "0.23.1"
 log = "0.4"
 mimalloc = "0.1"
-nom = { version = "8", features = ["std"] }
 paste = "1"
 proc-macro-crate = "3"
 proc-macro2 = "1"

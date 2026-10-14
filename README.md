@@ -18,9 +18,17 @@ This crate is an attempt to implement a random access iterator over CH blocks.
 It supposedly supports all CH types, supposedly correctly, including stuff like `Dynamic`,
 `JSON`, `LowCardinality`, etc.
 
+Escaped type-header field names, enum labels, and JSON paths are supported. Unescaped
+names borrow the input; escaped names are decoded into storage retained by the parsed
+block, so readers can borrow either form for the lifetime of the block.
+
 ## Known limitations
 
-1. Because header parsing is zero-copy, it doesn't support escaping, so escaped enum values will break the parser.
+1. Type-header names must be UTF-8. Invalid UTF-8 in the header, or an escape sequence that
+   decodes to invalid UTF-8, is an error rather than a lossy name.
+2. Valid `AggregateFunction(...)` state columns and `QBit(...)` declarations are
+   recognized at any nesting depth but return `Error::NotImplemented`; these columns
+   cannot currently be decoded or skipped.
 
 ## Perf
 

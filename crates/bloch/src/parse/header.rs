@@ -1,4 +1,4 @@
-use std::hint::cold_path;
+use std::{borrow::Cow, hint::cold_path};
 
 use log::debug;
 
@@ -163,7 +163,7 @@ pub fn json<'a>(
     typed_paths: &[Field<'a>],
 ) -> IResult<&'a [u8], JsonHeader<'a>> {
     debug_assert!(
-        typed_paths.is_sorted_by_key(|field| field.name),
+        typed_paths.is_sorted_by(|left, right| left.name <= right.name),
         "typed path prefixes are written in name order"
     );
     let (mut input, version) = parse_u64::<u64>(ctx.input)?;
@@ -190,10 +190,10 @@ pub fn json<'a>(
     let mut paths = Vec::with_capacity(cap);
     let mut col_headers = Vec::with_capacity(cap);
     for field in typed_paths {
-        paths.push(field.name);
+        paths.push(field.name.clone());
     }
     for path in dynamic_paths.data {
-        paths.push(crate::error::decode_utf8(path)?);
+        paths.push(Cow::Borrowed(crate::error::decode_utf8(path)?));
     }
 
     for field in typed_paths {

@@ -1,0 +1,393 @@
+use std::{borrow::Cow, hint::cold_path};
+use chrono_tz::{Tz, Tz::UTC};
+use crate::{Error, interval, types::{Field, Type}};
+use crate::parse::consts::{QBIT_MAX_STRIDE_GROUPS, QBIT_STRIDE_ALIGNMENT_BITS};
+use crate::parse::lexer::{Kw, Tok};
+use super::{enum_variants, quoted};
+
+grammar<'input>;
+
+extern {
+    type Location = usize;
+    type Error = Error;
+
+    enum Tok<'input> {
+        "(" => Tok::LParen,
+        ")" => Tok::RParen,
+        "," => Tok::Comma,
+        "=" => Tok::Eq,
+        " " => Tok::Space,
+        NUMBER => Tok::Number(<&'input str>),
+        NEGATIVE => Tok::Negative(<&'input str>),
+        QUOTED => Tok::Quoted(<&'input str>),
+        BACKQUOTED => Tok::Backquoted(<&'input str>),
+        WORD => Tok::Word(<&'input str>),
+        PATH => Tok::Path(<&'input str>),
+        "String" => Tok::Kw(Kw::String, <&'input str>),
+        "Bool" => Tok::Kw(Kw::Bool, <&'input str>),
+        "UInt8" => Tok::Kw(Kw::UInt8, <&'input str>),
+        "UInt16" => Tok::Kw(Kw::UInt16, <&'input str>),
+        "UInt32" => Tok::Kw(Kw::UInt32, <&'input str>),
+        "UInt64" => Tok::Kw(Kw::UInt64, <&'input str>),
+        "UInt128" => Tok::Kw(Kw::UInt128, <&'input str>),
+        "UInt256" => Tok::Kw(Kw::UInt256, <&'input str>),
+        "Int8" => Tok::Kw(Kw::Int8, <&'input str>),
+        "Int16" => Tok::Kw(Kw::Int16, <&'input str>),
+        "Int32" => Tok::Kw(Kw::Int32, <&'input str>),
+        "Int64" => Tok::Kw(Kw::Int64, <&'input str>),
+        "Int128" => Tok::Kw(Kw::Int128, <&'input str>),
+        "Int256" => Tok::Kw(Kw::Int256, <&'input str>),
+        "Float32" => Tok::Kw(Kw::Float32, <&'input str>),
+        "Float64" => Tok::Kw(Kw::Float64, <&'input str>),
+        "BFloat16" => Tok::Kw(Kw::BFloat16, <&'input str>),
+        "Date" => Tok::Kw(Kw::Date, <&'input str>),
+        "Date32" => Tok::Kw(Kw::Date32, <&'input str>),
+        "Time" => Tok::Kw(Kw::Time, <&'input str>),
+        "LineString" => Tok::Kw(Kw::LineString, <&'input str>),
+        "MultiLineString" => Tok::Kw(Kw::MultiLineString, <&'input str>),
+        "MultiPolygon" => Tok::Kw(Kw::MultiPolygon, <&'input str>),
+        "MultiPoint" => Tok::Kw(Kw::MultiPoint, <&'input str>),
+        "Polygon" => Tok::Kw(Kw::Polygon, <&'input str>),
+        "Ring" => Tok::Kw(Kw::Ring, <&'input str>),
+        "Point" => Tok::Kw(Kw::Point, <&'input str>),
+        "Geometry" => Tok::Kw(Kw::Geometry, <&'input str>),
+        "SharedVariant" => Tok::Kw(Kw::SharedVariant, <&'input str>),
+        "Nothing" => Tok::Kw(Kw::Nothing, <&'input str>),
+        "UUID" => Tok::Kw(Kw::Uuid, <&'input str>),
+        "IPv4" => Tok::Kw(Kw::Ipv4, <&'input str>),
+        "IPv6" => Tok::Kw(Kw::Ipv6, <&'input str>),
+        "IntervalNanosecond" => Tok::Kw(Kw::IntervalNanosecond, <&'input str>),
+        "IntervalMicrosecond" => Tok::Kw(Kw::IntervalMicrosecond, <&'input str>),
+        "IntervalMillisecond" => Tok::Kw(Kw::IntervalMillisecond, <&'input str>),
+        "IntervalSecond" => Tok::Kw(Kw::IntervalSecond, <&'input str>),
+        "IntervalMinute" => Tok::Kw(Kw::IntervalMinute, <&'input str>),
+        "IntervalHour" => Tok::Kw(Kw::IntervalHour, <&'input str>),
+        "IntervalDay" => Tok::Kw(Kw::IntervalDay, <&'input str>),
+        "IntervalWeek" => Tok::Kw(Kw::IntervalWeek, <&'input str>),
+        "IntervalMonth" => Tok::Kw(Kw::IntervalMonth, <&'input str>),
+        "IntervalQuarter" => Tok::Kw(Kw::IntervalQuarter, <&'input str>),
+        "IntervalYear" => Tok::Kw(Kw::IntervalYear, <&'input str>),
+        "FixedString" => Tok::Kw(Kw::FixedString, <&'input str>),
+        "Decimal" => Tok::Kw(Kw::Decimal, <&'input str>),
+        "Decimal32" => Tok::Kw(Kw::Decimal32, <&'input str>),
+        "Decimal64" => Tok::Kw(Kw::Decimal64, <&'input str>),
+        "Decimal128" => Tok::Kw(Kw::Decimal128, <&'input str>),
+        "Decimal256" => Tok::Kw(Kw::Decimal256, <&'input str>),
+        "DateTime" => Tok::Kw(Kw::DateTime, <&'input str>),
+        "DateTime64" => Tok::Kw(Kw::DateTime64, <&'input str>),
+        "Time64" => Tok::Kw(Kw::Time64, <&'input str>),
+        "Nullable" => Tok::Kw(Kw::Nullable, <&'input str>),
+        "LowCardinality" => Tok::Kw(Kw::LowCardinality, <&'input str>),
+        "Array" => Tok::Kw(Kw::Array, <&'input str>),
+        "Map" => Tok::Kw(Kw::Map, <&'input str>),
+        "Tuple" => Tok::Kw(Kw::Tuple, <&'input str>),
+        "Nested" => Tok::Kw(Kw::Nested, <&'input str>),
+        "Variant" => Tok::Kw(Kw::Variant, <&'input str>),
+        "Enum8" => Tok::Kw(Kw::Enum8, <&'input str>),
+        "Enum16" => Tok::Kw(Kw::Enum16, <&'input str>),
+        "JSON" => Tok::Kw(Kw::Json, <&'input str>),
+        "Dynamic" => Tok::Kw(Kw::Dynamic, <&'input str>),
+        "SimpleAggregateFunction" => Tok::Kw(Kw::SimpleAggregateFunction, <&'input str>),
+        "AggregateFunction" => Tok::Kw(Kw::AggregateFunction, <&'input str>),
+        "QBit" => Tok::Kw(Kw::QBit, <&'input str>),
+        "max_types" => Tok::Kw(Kw::MaxTypes, <&'input str>),
+        "max_dynamic_paths" => Tok::Kw(Kw::MaxDynamicPaths, <&'input str>),
+        "max_dynamic_types" => Tok::Kw(Kw::MaxDynamicTypes, <&'input str>),
+        "SKIP" => Tok::Kw(Kw::Skip, <&'input str>),
+        "REGEXP" => Tok::Kw(Kw::Regexp, <&'input str>),
+    }
+}
+
+pub Type: Type<'input> = {
+    "String" => Type::String,
+    "Bool" => Type::Bool,
+    "UInt8" => Type::UInt8,
+    "UInt16" => Type::UInt16,
+    "UInt32" => Type::UInt32,
+    "UInt64" => Type::UInt64,
+    "UInt128" => Type::UInt128,
+    "UInt256" => Type::UInt256,
+    "Int8" => Type::Int8,
+    "Int16" => Type::Int16,
+    "Int32" => Type::Int32,
+    "Int64" => Type::Int64,
+    "Int128" => Type::Int128,
+    "Int256" => Type::Int256,
+    "Float32" => Type::Float32,
+    "Float64" => Type::Float64,
+    "BFloat16" => Type::BFloat16,
+    "Date" => Type::Date,
+    "Date32" => Type::Date32,
+    "Time" => Type::Time,
+    "LineString" => Type::LineString,
+    "MultiLineString" => Type::MultiLineString,
+    "MultiPolygon" => Type::MultiPolygon,
+    "MultiPoint" => Type::MultiPoint,
+    "Polygon" => Type::Polygon,
+    "Ring" => Type::Ring,
+    "Point" => Type::Point,
+    "Geometry" => Type::Geometry,
+    "SharedVariant" => Type::SharedVariant,
+    "Nothing" => Type::Nothing,
+    "UUID" => Type::Uuid,
+    "IPv4" => Type::Ipv4,
+    "IPv6" => Type::Ipv6,
+    "IntervalNanosecond" => Type::Interval(interval::Kind::Nanosecond),
+    "IntervalMicrosecond" => Type::Interval(interval::Kind::Microsecond),
+    "IntervalMillisecond" => Type::Interval(interval::Kind::Millisecond),
+    "IntervalSecond" => Type::Interval(interval::Kind::Second),
+    "IntervalMinute" => Type::Interval(interval::Kind::Minute),
+    "IntervalHour" => Type::Interval(interval::Kind::Hour),
+    "IntervalDay" => Type::Interval(interval::Kind::Day),
+    "IntervalWeek" => Type::Interval(interval::Kind::Week),
+    "IntervalMonth" => Type::Interval(interval::Kind::Month),
+    "IntervalQuarter" => Type::Interval(interval::Kind::Quarter),
+    "IntervalYear" => Type::Interval(interval::Kind::Year),
+    "FixedString" "(" <n:Usize> ")" => Type::FixedString(n),
+    "Decimal" "(" <p:U8> "," <s:U8> ")" =>? Ok(Type::decimal(p, s)?),
+    "Decimal32" "(" <s:U8> ")" =>? Ok(Type::decimal(9, s)?),
+    "Decimal64" "(" <s:U8> ")" =>? Ok(Type::decimal(18, s)?),
+    "Decimal128" "(" <s:U8> ")" =>? Ok(Type::decimal(38, s)?),
+    "Decimal256" "(" <s:U8> ")" =>? Ok(Type::decimal(76, s)?),
+    "DateTime" <tz:("(" <Timezone> ")")?> => Type::DateTime(tz.unwrap_or(UTC)),
+    "DateTime64" <args:("(" <U8> <("," <Timezone>)?> ")")?> => {
+        let (scale, tz) = args.unwrap_or((3, None));
+        Type::DateTime64(scale, tz.unwrap_or(UTC))
+    },
+    "Time64" <scale:("(" <U8> ")")?> => Type::Time64(scale.unwrap_or(3)),
+    "Nullable" "(" <t:Type> ")" => Type::Nullable(Box::new(t)),
+    "LowCardinality" "(" <t:Type> ")" => Type::LowCardinality(Box::new(t)),
+    "Array" "(" <t:Type> ")" => Type::Array(Box::new(t)),
+    "Map" "(" <k:Type> "," <v:Type> ")" => Type::Map(Box::new(k), Box::new(v)),
+    "Tuple" "(" <types:Comma<Type>> ")" => Type::Tuple(types),
+    "Tuple" "(" <fields:Comma1<Field>> ")" => Type::NamedTuple(fields),
+    "Nested" "(" <fields:Comma1<Field>> ")" => Type::Nested(fields),
+    "Variant" "(" <types:Comma1<Type>> ")" => Type::Variant(types),
+    "Enum8" "(" <pairs:Comma1<EnumPair<I8>>> ")"
+        =>? Ok(Type::Enum8(enum_variants(pairs)?)),
+    "Enum16" "(" <pairs:Comma1<EnumPair<I16>>> ")"
+        =>? Ok(Type::Enum16(enum_variants(pairs)?)),
+    "Dynamic" <("(" "max_types" "=" NUMBER ")")?> => Type::Dynamic,
+    "JSON" <args:("(" <JsonArguments> ")")?> => {
+        let mut fields = args.unwrap_or_default();
+        fields.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Type::Json(fields)
+    },
+    // Row data uses the storage type's encoding, so function metadata is not needed to decode it.
+    "SimpleAggregateFunction" "(" Word AggregateParameters? "," <t:Type> ")" => t,
+    // `IAggregateFunction::serialize` writes state without a length prefix.
+    // Without a per-function layout we cannot decode or skip it, so reject a
+    // completed production here, including when it appears inside another type.
+    "AggregateFunction" "(" (U64 ",")? AggregateName AggregateParameters? AggregateTypes ")"
+        =>? {
+            cold_path();
+            Err(Error::NotImplemented("AggregateFunction state columns".into()).into())
+        },
+    // Distinguish a malformed declaration (`Error::Parse`) from a valid one this reader
+    // does not decode (`Error::NotImplemented`); the checks mirror `DataTypeQBit::DataTypeQBit`.
+    "QBit" "(" QBitElement "," <dimension:U64> <stride:("," <U64>)?> ")" =>? {
+        cold_path();
+        let stride = stride.unwrap_or(dimension);
+        let byte_aligned = stride == dimension || stride % QBIT_STRIDE_ALIGNMENT_BITS == 0;
+        if dimension == 0 || stride == 0 || dimension % stride != 0 || !byte_aligned
+            || dimension / stride > QBIT_MAX_STRIDE_GROUPS
+        {
+            Err(Error::Parse(format!("invalid QBit dimension {dimension} or stride {stride}")).into())
+        } else {
+            Err(Error::NotImplemented("QBit columns".into()).into())
+        }
+    },
+};
+
+Comma<T>: Vec<T> = {
+    => Vec::new(),
+    <Comma1<T>>,
+};
+
+Comma1<T>: Vec<T> = {
+    <item:T> => vec![item],
+    <mut items:Comma1<T>> "," <item:T> => {
+        items.push(item);
+        items
+    },
+};
+
+U8: u8 = <n:NUMBER> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("number {n:?} is out of range for u8: {error}")).into())
+    },
+};
+Usize: usize = <n:NUMBER> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("number {n:?} is out of range for usize: {error}")).into())
+    },
+};
+U64: u64 = <n:NUMBER> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("number {n:?} is out of range for u64: {error}")).into())
+    },
+};
+I8: i8 = <n:SignedNumber> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("enum value {n:?} is out of range for i8: {error}")).into())
+    },
+};
+I16: i16 = <n:SignedNumber> =>? match n.parse() {
+    Ok(value) => Ok(value),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("enum value {n:?} is out of range for i16: {error}")).into())
+    },
+};
+
+SignedNumber: &'input str = { NUMBER, NEGATIVE };
+
+Quoted: Cow<'input, str> = <s:QUOTED> =>? Ok(quoted(s)?);
+Backquoted: Cow<'input, str> = <s:BACKQUOTED> =>? Ok(quoted(s)?);
+Timezone: Tz = <s:Quoted> =>? match s.parse() {
+    Ok(timezone) => Ok(timezone),
+    Err(error) => {
+        cold_path();
+        Err(Error::Parse(format!("unknown timezone {s:?}: {error}")).into())
+    },
+};
+
+EnumPair<T>: (Cow<'input, str>, T) = <label:Quoted> " " "=" " " <value:T> => (label, value);
+
+Field: Field<'input> = <name:Identifier> " " <typ:Type> => Field { name, typ };
+Identifier: Cow<'input, str> = { <s:Word> => Cow::Borrowed(s), Backquoted };
+Path: Cow<'input, str> = {
+    <s:OrdinaryWord> => Cow::Borrowed(s),
+    <s:NUMBER> => Cow::Borrowed(s),
+    Backquoted,
+    <s:PATH> => Cow::Borrowed(s),
+    <s:NEGATIVE> => Cow::Borrowed(s),
+};
+
+// Settings and skip directives do not change typed-path serialization.
+JsonArguments: Vec<Field<'input>> = {
+    => Vec::new(),
+    <JsonArguments1>,
+};
+JsonArguments1: Vec<Field<'input>> = {
+    <arg:JsonArgument> => arg.into_iter().collect(),
+    <mut fields:JsonArguments1> "," <arg:JsonArgument> => {
+        fields.extend(arg);
+        fields
+    },
+};
+JsonArgument: Option<Field<'input>> = {
+    "max_dynamic_paths" "=" NUMBER => None,
+    "max_dynamic_types" "=" NUMBER => None,
+    "SKIP" " " <SkipPath> => None,
+    "SKIP" " " "REGEXP" " " <SkipPath> => None,
+    <name:Path> " " <typ:Type> => Some(Field { name, typ }),
+};
+SkipPath: () = { Path => (), "SKIP" => (), Quoted => () };
+
+// Aggregate parameters do not affect the storage decoder. Balance nested calls
+// without building a parameter AST that no consumer needs.
+AggregateName: &'input str = { OrdinaryWord, "SKIP" };
+AggregateParameters: () = "(" AggregateTokens ")" => ();
+AggregateTokens: () = {
+    => (),
+    AggregateTokens AggregateParameter => (),
+};
+AggregateParameter: () = {
+    Word => (), PATH => (), NEGATIVE => (), QUOTED => (), BACKQUOTED => (),
+    AggregateParameters => (), "," => (), "=" => (), " " => (),
+};
+
+// Validate argument types without collecting a vector that would only be discarded.
+AggregateTypes: () = {
+    => (),
+    AggregateTypes "," Type => (),
+};
+
+QBitElement: () = { "Int8" => (), "BFloat16" => (), "Float32" => (), "Float64" => () };
+
+// A keyword can name a field or function, and numeric names are accepted too.
+// Keep these terminals available as words so type recognition does not reserve names.
+Word: &'input str = { OrdinaryWord, NUMBER, "SKIP" };
+OrdinaryWord: &'input str = {
+    WORD,
+    "String",
+    "Bool",
+    "UInt8",
+    "UInt16",
+    "UInt32",
+    "UInt64",
+    "UInt128",
+    "UInt256",
+    "Int8",
+    "Int16",
+    "Int32",
+    "Int64",
+    "Int128",
+    "Int256",
+    "Float32",
+    "Float64",
+    "BFloat16",
+    "Date",
+    "Date32",
+    "Time",
+    "LineString",
+    "MultiLineString",
+    "MultiPolygon",
+    "MultiPoint",
+    "Polygon",
+    "Ring",
+    "Point",
+    "Geometry",
+    "SharedVariant",
+    "Nothing",
+    "UUID",
+    "IPv4",
+    "IPv6",
+    "IntervalNanosecond",
+    "IntervalMicrosecond",
+    "IntervalMillisecond",
+    "IntervalSecond",
+    "IntervalMinute",
+    "IntervalHour",
+    "IntervalDay",
+    "IntervalWeek",
+    "IntervalMonth",
+    "IntervalQuarter",
+    "IntervalYear",
+    "FixedString",
+    "Decimal",
+    "Decimal32",
+    "Decimal64",
+    "Decimal128",
+    "Decimal256",
+    "DateTime",
+    "DateTime64",
+    "Time64",
+    "Nullable",
+    "LowCardinality",
+    "Array",
+    "Map",
+    "Tuple",
+    "Nested",
+    "Variant",
+    "Enum8",
+    "Enum16",
+    "JSON",
+    "Dynamic",
+    "SimpleAggregateFunction",
+    "AggregateFunction",
+    "QBit",
+    "max_types",
+    "max_dynamic_paths",
+    "max_dynamic_types",
+    "REGEXP",
+};

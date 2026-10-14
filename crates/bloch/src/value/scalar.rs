@@ -1,5 +1,6 @@
 use core::{convert::TryFrom, hint::cold_path};
 use std::{
+    borrow::Cow,
     net::{Ipv4Addr, Ipv6Addr},
     ops::Range,
 };
@@ -567,7 +568,7 @@ impl Iterator for Decimal128SliceIterator<'_> {
 
 impl ExactSizeIterator for Decimal128SliceIterator<'_> {}
 pub struct Enum8SliceIterator<'a> {
-    variants: &'a [(&'a str, i8)],
+    variants: &'a [(Cow<'a, str>, i8)],
     data: std::slice::Iter<'a, i8>,
 }
 
@@ -595,7 +596,7 @@ impl<'a> Iterator for Enum8SliceIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.data.next()?;
         if let Ok(index) = self.variants.binary_search_by_key(value, |(_, id)| *id) {
-            return Some(self.variants[index].0);
+            return Some(self.variants[index].0.as_ref());
         }
 
         None
@@ -609,7 +610,7 @@ impl<'a> Iterator for Enum8SliceIterator<'a> {
 impl ExactSizeIterator for Enum8SliceIterator<'_> {}
 
 pub struct Enum16SliceIterator<'a> {
-    variants: &'a [(&'a str, i16)],
+    variants: &'a [(Cow<'a, str>, i16)],
     data: std::slice::Iter<'a, zc::I16>,
 }
 
@@ -637,7 +638,7 @@ impl<'a> Iterator for Enum16SliceIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.data.next()?.get();
         if let Ok(index) = self.variants.binary_search_by_key(&value, |(_, id)| *id) {
-            return Some(self.variants[index].0);
+            return Some(self.variants[index].0.as_ref());
         }
 
         None
