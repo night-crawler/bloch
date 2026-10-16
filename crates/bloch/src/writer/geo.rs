@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use super::{Array, ColumnWriter, ConstSizeWriter, F64, Writable, WriteColumn};
+use super::{Array, ColumnWriter, ConstSizeWriter, F64, Writable, WriteColumn, WriteValue};
 use crate::reader::TryRead;
 use crate::{Result, reader};
 
@@ -40,6 +40,14 @@ macro_rules! geo {
             }
         }
 
+        impl WriteValue for $name {
+            type Value<'a> = <$writer as WriteValue>::Value<'a>;
+
+            fn write(&mut self, value: Self::Value<'_>) -> Result<()> {
+                self.0.write(value)
+            }
+        }
+
         impl<'a> Writable<'a> for reader::$name<'a> {
             type Writer = $name;
         }
@@ -49,8 +57,8 @@ macro_rules! geo {
                 Self(<$writer as WriteColumn<'a, $reader>>::for_reader(&reader.0))
             }
 
-            fn write(&mut self, item: <$reader as TryRead<'a>>::Item) -> Result<()> {
-                <$writer as WriteColumn<'a, $reader>>::write(&mut self.0, item)
+            fn write_item(&mut self, item: <$reader as TryRead<'a>>::Item) -> Result<()> {
+                <$writer as WriteColumn<'a, $reader>>::write_item(&mut self.0, item)
             }
         }
     )+};

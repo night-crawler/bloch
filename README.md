@@ -281,6 +281,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 writer with `#[col(writer = ...)]`, e.g. `writer::Lc<Box<str>, writer::Str, GxBuildHasher>` to hash
 `LowCardinality` dictionaries differently.
 
+It also generates `RowRow`, the same columns as plain values, for callers that have no parsed
+block: scalars by value, strings as `&str`, `Nullable` as `Option`, `Array`/`Map` as slices,
+`Variant` as `Option<Enum>`. Rows are `Copy` unless a `Variant` payload owns data. Two schemas
+written side by side form one block through a tuple: `BlockWriter<(LevelWriter, RowWriter)>`
+takes `(LevelRow { .. }, RowRow { .. })`.
+
+```rust
+writer.write(RowRow {
+    name: "name",
+    attrs: &[("k", "v")],
+})?;
+```
+
 Generic reader, iterator, and writer structs declare their required trait bounds on the type.
 Additional capabilities such as default column construction remain conditional on the relevant impl.
 

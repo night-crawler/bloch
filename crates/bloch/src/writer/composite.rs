@@ -4,7 +4,8 @@ use std::{
 };
 
 use super::{
-    ColumnWriter, ElementWriters, VariantName, Writable, WriteColumn, WriteVariant, write_offsets,
+    ColumnWriter, ElementWriters, VariantName, Writable, WriteColumn, WriteValue, WriteVariant,
+    write_offsets,
 };
 use crate::{Result, reader};
 
@@ -75,8 +76,25 @@ impl<'a, Inner: Writable<'a> + 'a> WriteColumn<'a, reader::Nullable<'a, Inner>>
         Self::new(Inner::Writer::for_reader(&reader.inner))
     }
 
-    fn write(&mut self, item: Option<Inner::Item>) -> Result<()> {
+    fn write_item(&mut self, item: Option<Inner::Item>) -> Result<()> {
         match item {
+            Some(value) => {
+                self.nulls.push(0);
+                self.inner.write_item(value)
+            }
+            None => {
+                self.write_default();
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<Inner: WriteValue> WriteValue for Nullable<Inner> {
+    type Value<'a> = Option<Inner::Value<'a>>;
+
+    fn write(&mut self, value: Option<Inner::Value<'_>>) -> Result<()> {
+        match value {
             Some(value) => {
                 self.nulls.push(0);
                 self.inner.write(value)
@@ -102,16 +120,24 @@ impl<Values: ColumnWriter> Array<Values> {
         }
     }
 
-    pub fn write_iter<'a, R: reader::TryRead<'a>>(
+    pub fn write_iter<'a>(
         &mut self,
-        values: impl IntoIterator<Item = R::Item>,
+        values: impl IntoIterator<Item = Values::Value<'a>>,
     ) -> Result<()>
     where
-        Values: WriteColumn<'a, R>,
+        Values: WriteValue,
     {
+        self.write_with(values, Values::write)
+    }
+
+    fn write_with<T>(
+        &mut self,
+        values: impl IntoIterator<Item = T>,
+        mut write_value: impl FnMut(&mut Values, T) -> Result<()>,
+    ) -> Result<()> {
         let mut end = self.offsets.last().copied().unwrap_or(0);
         for value in values {
-            self.values.write(value)?;
+            write_value(&mut self.values, value)?;
             end += 1;
         }
         self.offsets.push(end);
@@ -173,14 +199,20 @@ impl<'a, Inner: Writable<'a> + 'a> WriteColumn<'a, reader::Array<'a, Inner>>
         Self::new(values)
     }
 
-    fn write(&mut self, item: reader::ArrayIter<'a, Inner>) -> Result<()> {
-        let mut end = self.offsets.last().copied().unwrap_or(0);
-        for value in item {
-            self.values.write(value?)?;
-            end += 1;
-        }
-        self.offsets.push(end);
-        Ok(())
+    fn write_item(&mut self, item: reader::ArrayIter<'a, Inner>) -> Result<()> {
+        self.write_with(item, |values, item| values.write_item(item?))
+    }
+}
+
+impl<Values> WriteValue for Array<Values>
+where
+    Values: WriteValue,
+    for<'a> Values::Value<'a>: Copy,
+{
+    type Value<'a> = &'a [Values::Value<'a>];
+
+    fn write(&mut self, values: Self::Value<'_>) -> Result<()> {
+        self.write_iter(values.iter().copied())
     }
 }
 
@@ -267,14 +299,36 @@ where
         Self::new(keys, values)
     }
 
-    fn write(&mut self, item: reader::MapIter<'a, K, V>) -> Result<()> {
+    fn write_item(&mut self, item: reader::MapIter<'a, K, V>) -> Result<()> {
         let mut end = self.offsets.last().copied().unwrap_or(0);
         for entry in item {
             let (key, value) = entry?;
-            self.keys.write(key)?;
-            self.values.write(value)?;
+            self.keys.write_item(key)?;
+            self.values.write_item(value)?;
             end += 1;
         }
+        self.offsets.push(end);
+        Ok(())
+    }
+}
+
+impl<Keys, Values> WriteValue for Map<Keys, Values>
+where
+    Keys: WriteValue,
+    Values: WriteValue,
+    for<'a> Keys::Value<'a>: Copy,
+    for<'a> Values::Value<'a>: Copy,
+{
+    type Value<'a> = &'a [(Keys::Value<'a>, Values::Value<'a>)];
+
+    fn write(&mut self, entries: Self::Value<'_>) -> Result<()> {
+        for &(key, value) in entries {
+            self.keys.write(key)?;
+            self.values.write(value)?;
+        }
+
+        let end = self.offsets.last().copied().unwrap_or(0) + entries.len() as u64;
+
         self.offsets.push(end);
         Ok(())
     }
@@ -364,8 +418,17 @@ macro_rules! tuples {
                 ($($t::Writer::for_reader(&reader.0.$idx),)+)
             }
 
-            fn write(&mut self, item: ($($t::Item,)+)) -> Result<()> {
-                $(self.$idx.write(item.$idx)?;)+
+            fn write_item(&mut self, item: ($($t::Item,)+)) -> Result<()> {
+                $(self.$idx.write_item(item.$idx)?;)+
+                Ok(())
+            }
+        }
+
+        impl<$($t: WriteValue,)+> WriteValue for ($($t,)+) {
+            type Value<'a> = ($($t::Value<'a>,)+);
+
+            fn write(&mut self, value: Self::Value<'_>) -> Result<()> {
+                $(self.$idx.write(value.$idx)?;)+
                 Ok(())
             }
         }
@@ -396,6 +459,12 @@ impl<W: ElementWriters, N: VariantName> Variant<W, N> {
             writers,
             name: PhantomData,
         }
+    }
+
+    fn write_variant<'a>(&mut self, value: impl WriteVariant<'a, Writers = W>) -> Result<()> {
+        let discriminator = value.write(&mut self.writers)?;
+        self.discriminators.push(discriminator);
+        Ok(())
     }
 }
 
@@ -466,10 +535,8 @@ impl<'a, T: WriteVariant<'a> + 'a> WriteColumn<'a, reader::Variant<'a, T>>
         Self::new(T::writers(&reader.readers))
     }
 
-    fn write(&mut self, item: T) -> Result<()> {
-        let discriminator = item.write(&mut self.writers)?;
-        self.discriminators.push(discriminator);
-        Ok(())
+    fn write_item(&mut self, item: T) -> Result<()> {
+        self.write_variant(item)
     }
 }
 
@@ -484,9 +551,26 @@ impl<'a, T: WriteVariant<'a> + 'a> WriteColumn<'a, reader::VariantNullable<'a, T
         Self::new(T::writers(&reader.inner.readers))
     }
 
-    fn write(&mut self, item: Option<T>) -> Result<()> {
+    fn write_item(&mut self, item: Option<T>) -> Result<()> {
         match item {
-            Some(value) => WriteColumn::<reader::Variant<'a, T>>::write(self, value),
+            Some(value) => self.write_variant(value),
+            None => {
+                self.write_default();
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<W: ElementWriters, N: VariantName> WriteValue for Variant<W, N>
+where
+    for<'a> N::Value<'a>: WriteVariant<'a, Writers = W>,
+{
+    type Value<'a> = Option<N::Value<'a>>;
+
+    fn write(&mut self, value: Option<N::Value<'_>>) -> Result<()> {
+        match value {
+            Some(value) => self.write_variant(value),
             None => {
                 self.write_default();
                 Ok(())

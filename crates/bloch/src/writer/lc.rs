@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use rustc_hash::FxBuildHasher;
 
-use super::{ColumnWriter, Writable, WriteColumn, write_le};
+use super::{ColumnWriter, Writable, WriteColumn, WriteValue, write_le};
 use crate::{
     Result,
     parse::consts::{
@@ -81,6 +81,7 @@ lc_key!(
     f64 => u64, |v| v.to_bits();
     half::bf16 => u16, |v| v.to_bits();
     chrono::DateTime<chrono_tz::Tz> => (i64, u32), |v| (v.timestamp(), v.timestamp_subsec_nanos());
+    chrono::DateTime<chrono::Utc> => (i64, u32), |v| (v.timestamp(), v.timestamp_subsec_nanos());
 );
 
 impl LcDictionaryKeyDefault for (i64, u32) {
@@ -115,6 +116,15 @@ impl<'a> LcKey for &'a bstr::BStr {
     type Lookup = [u8];
     type Value = &'a [u8];
     fn lc_key(self) -> &'a [u8] {
+        self
+    }
+}
+
+impl LcKey for &[u8] {
+    type Key = Box<[u8]>;
+    type Lookup = [u8];
+    type Value = Self;
+    fn lc_key(self) -> Self {
         self
     }
 }
@@ -163,6 +173,22 @@ impl<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
         };
         self.indices.push(index);
         Ok(inserted)
+    }
+
+    fn write<V>(
+        &mut self,
+        value: V,
+        write_key: impl FnOnce(&mut Keys, V) -> Result<()>,
+    ) -> Result<()>
+    where
+        V: LcKey<Key = Key>,
+        Key: Borrow<V::Lookup>,
+    {
+        let key = value.lc_key();
+        if self.insert::<V::Lookup>(key.borrow(), || key.into())? {
+            write_key(&mut self.keys, value)?;
+        }
+        Ok(())
     }
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
@@ -303,15 +329,24 @@ where
         }
     }
 
-    fn write(&mut self, item: Inner::Item) -> Result<()> {
-        let key = item.lc_key();
-        if self
-            .dict
-            .insert::<<Inner::Item as LcKey>::Lookup>(key.borrow(), || key.into())?
-        {
-            self.dict.keys.write(item)?;
-        }
-        Ok(())
+    fn write_item(&mut self, item: Inner::Item) -> Result<()> {
+        self.dict
+            .write(item, <Inner::Writer as WriteColumn<Inner>>::write_item)
+    }
+}
+
+impl<K, Keys, S> WriteValue for Lc<K, Keys, S>
+where
+    K: LcDictionaryKeyDefault,
+    Keys: WriteValue,
+    for<'a> Keys::Value<'a>: LcKey<Key = K>,
+    for<'a> K: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
+    S: BuildHasher + Default,
+{
+    type Value<'a> = Keys::Value<'a>;
+
+    fn write(&mut self, value: Keys::Value<'_>) -> Result<()> {
+        self.dict.write(value, Keys::write)
     }
 }
 
@@ -403,19 +438,36 @@ where
         }
     }
 
-    fn write(&mut self, item: Option<Inner::Item>) -> Result<()> {
+    fn write_item(&mut self, item: Option<Inner::Item>) -> Result<()> {
         match item {
-            Some(item) => {
-                let key = item.lc_key();
-                if self
-                    .dict
-                    .insert::<<Inner::Item as LcKey>::Lookup>(key.borrow(), || key.into())?
-                {
-                    self.dict.keys.write(item)?;
-                }
+            Some(item) => self
+                .dict
+                .write(item, <Inner::Writer as WriteColumn<Inner>>::write_item),
+            None => {
+                self.dict.write_default();
+                Ok(())
             }
-            None => self.dict.write_default(),
         }
-        Ok(())
+    }
+}
+
+impl<K, Keys, S> WriteValue for LcNullable<K, Keys, S>
+where
+    K: LcDictionaryKeyDefault,
+    Keys: WriteValue,
+    for<'a> Keys::Value<'a>: LcKey<Key = K>,
+    for<'a> K: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
+    S: BuildHasher + Default,
+{
+    type Value<'a> = Option<Keys::Value<'a>>;
+
+    fn write(&mut self, value: Option<Keys::Value<'_>>) -> Result<()> {
+        match value {
+            Some(value) => self.dict.write(value, Keys::write),
+            None => {
+                self.dict.write_default();
+                Ok(())
+            }
+        }
     }
 }

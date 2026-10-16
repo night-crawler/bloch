@@ -3,12 +3,12 @@ use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
-use chrono::{NaiveDate, TimeDelta};
+use chrono::{NaiveDate, TimeDelta, Utc};
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
 use rustc_hash::FxBuildHasher;
 
-use super::{ConstSizeType, ConstSizeWriter, Writable, WriteColumn, write_quoted};
+use super::{ConstSizeType, ConstSizeWriter, Writable, WriteColumn, WriteValue as _, write_quoted};
 use crate::{Error, Result, conv, interval, mark::Mark, reader};
 
 fn uuid_bytes(value: uuid::Uuid) -> [u8; 16] {
@@ -26,12 +26,20 @@ macro_rules! scalars {
         pub struct $name;
 
         impl ConstSizeType for $name {
+            type Value<'a> = $item;
+
             fn write_type_name(&self, out: &mut String) {
                 out.push_str($type_name);
             }
 
             fn value_size(&self) -> usize {
                 $width
+            }
+
+            fn write(&self, $v: Self::Value<'_>, data: &mut Vec<u8>) -> Result<()> {
+                let bytes: [u8; $width] = $bytes;
+                data.extend_from_slice(&bytes);
+                Ok(())
             }
         }
 
@@ -44,10 +52,8 @@ macro_rules! scalars {
                 Self::default()
             }
 
-            fn write(&mut self, $v: $item) -> Result<()> {
-                let bytes: [u8; $width] = $bytes;
-                self.data.extend_from_slice(&bytes);
-                Ok(())
+            fn write_item(&mut self, item: $item) -> Result<()> {
+                self.write(item)
             }
         }
     )+};
@@ -82,6 +88,8 @@ scalars! {
 pub struct Nothing;
 
 impl ConstSizeType for Nothing {
+    type Value<'a> = ();
+
     fn write_type_name(&self, out: &mut String) {
         out.push_str("Nothing");
     }
@@ -92,6 +100,11 @@ impl ConstSizeType for Nothing {
 
     fn write_default(&self, data: &mut Vec<u8>) {
         data.push(b'0');
+    }
+
+    fn write(&self, (): (), data: &mut Vec<u8>) -> Result<()> {
+        self.write_default(data);
+        Ok(())
     }
 }
 
@@ -104,9 +117,8 @@ impl WriteColumn<'_, reader::Nothing> for ConstSizeWriter<Nothing> {
         Self::default()
     }
 
-    fn write(&mut self, (): ()) -> Result<()> {
-        self.ty.write_default(&mut self.data);
-        Ok(())
+    fn write_item(&mut self, (): ()) -> Result<()> {
+        self.write(())
     }
 }
 
@@ -117,6 +129,8 @@ pub struct Usize {
 }
 
 impl ConstSizeType for Usize {
+    type Value<'a> = usize;
+
     fn write_type_name(&self, out: &mut String) {
         out.push_str(match self.width {
             1 => "UInt8",
@@ -128,6 +142,20 @@ impl ConstSizeType for Usize {
 
     fn value_size(&self) -> usize {
         self.width
+    }
+
+    fn write(&self, value: usize, data: &mut Vec<u8>) -> Result<()> {
+        let width = self.width;
+        let wide = u64::try_from(value)?;
+        if width < 8 && wide >> (8 * width) != 0 {
+            return Err(Error::ValueOutOfRange(
+                "usize",
+                "column width",
+                value.to_string(),
+            ));
+        }
+        data.extend_from_slice(&wide.to_le_bytes()[..width]);
+        Ok(())
     }
 }
 
@@ -146,18 +174,8 @@ impl<'a> WriteColumn<'a, reader::Usize<'a>> for ConstSizeWriter<Usize> {
         Self::new(Usize { width })
     }
 
-    fn write(&mut self, item: usize) -> Result<()> {
-        let width = self.ty.width;
-        let value = u64::try_from(item)?;
-        if width < 8 && value >> (8 * width) != 0 {
-            return Err(Error::ValueOutOfRange(
-                "usize",
-                "column width",
-                item.to_string(),
-            ));
-        }
-        self.data.extend_from_slice(&value.to_le_bytes()[..width]);
-        Ok(())
+    fn write_item(&mut self, item: usize) -> Result<()> {
+        self.write(item)
     }
 }
 
@@ -187,6 +205,8 @@ macro_rules! enums {
         }
 
         impl ConstSizeType for $name {
+            type Value<'a> = &'a str;
+
             fn write_type_name(&self, out: &mut String) {
                 out.push_str(concat!($type_name, "("));
                 for (index, (name, id)) in self.variants.iter().enumerate() {
@@ -208,6 +228,18 @@ macro_rules! enums {
                 let id = self.variants.first().map_or(0, |(_, id)| *id);
                 data.extend_from_slice(&id.to_le_bytes());
             }
+
+            fn write(&self, value: &str, data: &mut Vec<u8>) -> Result<()> {
+                let Some(id) = self.ids.get(value) else {
+                    return Err(Error::ValueOutOfRange(
+                        $type_name,
+                        "declared variant",
+                        value.to_owned(),
+                    ));
+                };
+                data.extend_from_slice(&id.to_le_bytes());
+                Ok(())
+            }
         }
 
         impl<'a> Writable<'a> for reader::$name<'a> {
@@ -219,16 +251,8 @@ macro_rules! enums {
                 Self::new($name::new(&reader.0.variants))
             }
 
-            fn write(&mut self, item: &'a str) -> Result<()> {
-                let Some(id) = self.ty.ids.get(item) else {
-                    return Err(Error::ValueOutOfRange(
-                        $type_name,
-                        "declared variant",
-                        item.to_owned(),
-                    ));
-                };
-                self.data.extend_from_slice(&id.to_le_bytes());
-                Ok(())
+            fn write_item(&mut self, item: &'a str) -> Result<()> {
+                self.write(item)
             }
         }
     )+};
@@ -251,6 +275,8 @@ pub struct DateTime {
 }
 
 impl ConstSizeType for DateTime {
+    type Value<'a> = chrono::DateTime<Utc>;
+
     fn write_type_name(&self, out: &mut String) {
         out.push_str("DateTime");
         if self.tz.is_some() {
@@ -262,6 +288,18 @@ impl ConstSizeType for DateTime {
 
     fn value_size(&self) -> usize {
         4
+    }
+
+    fn write(&self, value: chrono::DateTime<Utc>, data: &mut Vec<u8>) -> Result<()> {
+        let Ok(seconds) = u32::try_from(value.timestamp()) else {
+            return Err(Error::ValueOutOfRange(
+                "DateTime<Utc>",
+                "DateTime",
+                value.to_string(),
+            ));
+        };
+        data.extend_from_slice(&seconds.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -275,16 +313,8 @@ impl<'a> WriteColumn<'a, reader::DateTime<'a>> for ConstSizeWriter<DateTime> {
         Self::new(DateTime { tz })
     }
 
-    fn write(&mut self, item: chrono::DateTime<Tz>) -> Result<()> {
-        let Ok(seconds) = u32::try_from(item.timestamp()) else {
-            return Err(Error::ValueOutOfRange(
-                "DateTime<Tz>",
-                "DateTime",
-                item.to_string(),
-            ));
-        };
-        self.data.extend_from_slice(&seconds.to_le_bytes());
-        Ok(())
+    fn write_item(&mut self, item: chrono::DateTime<Tz>) -> Result<()> {
+        self.write(item.to_utc())
     }
 }
 
@@ -295,6 +325,8 @@ pub struct DateTime64 {
 }
 
 impl ConstSizeType for DateTime64 {
+    type Value<'a> = chrono::DateTime<Utc>;
+
     fn write_type_name(&self, out: &mut String) {
         let _ = write!(out, "DateTime64({}", self.precision);
         if self.tz.is_some() {
@@ -306,6 +338,14 @@ impl ConstSizeType for DateTime64 {
 
     fn value_size(&self) -> usize {
         8
+    }
+
+    fn write(&self, value: chrono::DateTime<Utc>, data: &mut Vec<u8>) -> Result<()> {
+        let total_nanos = i128::from(value.timestamp()) * 1_000_000_000
+            + i128::from(value.timestamp_subsec_nanos());
+        let ticks = conv::ticks(total_nanos, self.precision, "DateTime64")?;
+        data.extend_from_slice(&ticks.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -320,12 +360,8 @@ impl<'a> WriteColumn<'a, reader::DateTime64<'a>> for ConstSizeWriter<DateTime64>
         Self::new(DateTime64 { precision, tz })
     }
 
-    fn write(&mut self, item: chrono::DateTime<Tz>) -> Result<()> {
-        let total_nanos = i128::from(item.timestamp()) * 1_000_000_000
-            + i128::from(item.timestamp_subsec_nanos());
-        let ticks = conv::ticks(total_nanos, self.ty.precision, "DateTime64")?;
-        self.data.extend_from_slice(&ticks.to_le_bytes());
-        Ok(())
+    fn write_item(&mut self, item: chrono::DateTime<Tz>) -> Result<()> {
+        self.write(item.to_utc())
     }
 }
 
@@ -335,12 +371,20 @@ pub struct Time64 {
 }
 
 impl ConstSizeType for Time64 {
+    type Value<'a> = TimeDelta;
+
     fn write_type_name(&self, out: &mut String) {
         let _ = write!(out, "Time64({})", self.precision);
     }
 
     fn value_size(&self) -> usize {
         8
+    }
+
+    fn write(&self, value: TimeDelta, data: &mut Vec<u8>) -> Result<()> {
+        let ticks = conv::ticks(conv::total_nanos(value), self.precision, "Time64")?;
+        data.extend_from_slice(&ticks.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -354,10 +398,8 @@ impl<'a> WriteColumn<'a, reader::Time64<'a>> for ConstSizeWriter<Time64> {
         Self::new(Time64 { precision })
     }
 
-    fn write(&mut self, item: TimeDelta) -> Result<()> {
-        let ticks = conv::ticks(conv::total_nanos(item), self.ty.precision, "Time64")?;
-        self.data.extend_from_slice(&ticks.to_le_bytes());
-        Ok(())
+    fn write_item(&mut self, item: TimeDelta) -> Result<()> {
+        self.write(item)
     }
 }
 
@@ -367,6 +409,8 @@ pub struct Interval {
 }
 
 impl ConstSizeType for Interval {
+    type Value<'a> = TimeDelta;
+
     fn write_type_name(&self, out: &mut String) {
         out.push_str("Interval");
         out.push_str(self.kind.as_str());
@@ -374,6 +418,27 @@ impl ConstSizeType for Interval {
 
     fn value_size(&self) -> usize {
         8
+    }
+
+    fn write(&self, value: TimeDelta, data: &mut Vec<u8>) -> Result<()> {
+        let Some(unit) = self.kind.unit_nanos() else {
+            return Err(Error::MismatchedType(
+                self.kind.as_str(),
+                "fixed-length Interval",
+            ));
+        };
+        let total = conv::total_nanos(value);
+        let unit = i128::from(unit);
+        if total % unit != 0 {
+            return Err(Error::ValueOutOfRange(
+                "TimeDelta",
+                "whole Interval units",
+                value.to_string(),
+            ));
+        }
+        let count = i64::try_from(total / unit)?;
+        data.extend_from_slice(&count.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -387,26 +452,8 @@ impl<'a> WriteColumn<'a, reader::Interval<'a>> for ConstSizeWriter<Interval> {
         Self::new(Interval { kind })
     }
 
-    fn write(&mut self, item: TimeDelta) -> Result<()> {
-        let kind = self.ty.kind;
-        let Some(unit) = kind.unit_nanos() else {
-            return Err(Error::MismatchedType(
-                kind.as_str(),
-                "fixed-length Interval",
-            ));
-        };
-        let total = conv::total_nanos(item);
-        let unit = i128::from(unit);
-        if total % unit != 0 {
-            return Err(Error::ValueOutOfRange(
-                "TimeDelta",
-                "whole Interval units",
-                item.to_string(),
-            ));
-        }
-        let count = i64::try_from(total / unit)?;
-        self.data.extend_from_slice(&count.to_le_bytes());
-        Ok(())
+    fn write_item(&mut self, item: TimeDelta) -> Result<()> {
+        self.write(item)
     }
 }
 
@@ -419,12 +466,29 @@ macro_rules! decimals {
         }
 
         impl ConstSizeType for $name {
+            type Value<'a> = Decimal;
+
             fn write_type_name(&self, out: &mut String) {
                 let _ = write!(out, "Decimal({}, {})", $precision, self.scale);
             }
 
             fn value_size(&self) -> usize {
                 size_of::<$int>()
+            }
+
+            fn write(&self, mut value: Decimal, data: &mut Vec<u8>) -> Result<()> {
+                let scale = u32::from(self.scale);
+                value.rescale(scale);
+                let mantissa = <$int>::try_from(value.mantissa()).ok();
+                let Some(mantissa) = mantissa.filter(|_| value.scale() == scale) else {
+                    return Err(Error::ValueOutOfRange(
+                        "Decimal",
+                        stringify!($name),
+                        value.to_string(),
+                    ));
+                };
+                data.extend_from_slice(&mantissa.to_le_bytes());
+                Ok(())
             }
         }
 
@@ -438,19 +502,8 @@ macro_rules! decimals {
                 Self::new($name { scale })
             }
 
-            fn write(&mut self, mut item: Decimal) -> Result<()> {
-                let scale = u32::from(self.ty.scale);
-                item.rescale(scale);
-                let mantissa = <$int>::try_from(item.mantissa()).ok();
-                let Some(mantissa) = mantissa.filter(|_| item.scale() == scale) else {
-                    return Err(Error::ValueOutOfRange(
-                        "Decimal",
-                        stringify!($name),
-                        item.to_string(),
-                    ));
-                };
-                self.data.extend_from_slice(&mantissa.to_le_bytes());
-                Ok(())
+            fn write_item(&mut self, item: Decimal) -> Result<()> {
+                self.write(item)
             }
         }
     )+};

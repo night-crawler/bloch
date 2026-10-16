@@ -275,3 +275,78 @@ fn column_writer_can_be_chosen_per_field() -> Result<(), Box<dyn std::error::Err
     }
     Ok(())
 }
+
+#[derive(renamed_bloch::FromBlock, renamed_bloch::WriteBlock, Copy, Clone)]
+struct Sample<'a> {
+    id: renamed_bloch::reader::Lc<'a, I64<'a>>,
+    name: renamed_bloch::reader::LcNullableStr<'a>,
+    at: renamed_bloch::reader::DateTime<'a>,
+    tags: Array<'a, LcStr<'a>>,
+    nested: Array<'a, Array<'a, U8<'a>>>,
+    payload: VariantNullable<'a, Payload<'a>>,
+}
+
+#[derive(renamed_bloch::FromBlock, renamed_bloch::WriteBlock, Copy, Clone)]
+struct Level<'a> {
+    level: U8<'a>,
+}
+
+#[test]
+fn row_values_and_slices_round_trip() -> renamed_bloch::Result<()> {
+    let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+    let mut writer = renamed_bloch::BlockWriter::<(LevelWriter, SampleWriter)>::new();
+    let name = "owned".to_owned();
+    writer.write((
+        LevelRow { level: 1 },
+        SampleRow {
+            id: 7,
+            name: Some(&name),
+            at,
+            tags: &["x", "", "x"],
+            nested: &[&[1, 2][..], &[]],
+            payload: Some(Payload::Integer(3)),
+        },
+    ))?;
+    writer.write((
+        LevelRow { level: 2 },
+        SampleRow {
+            id: 7,
+            name: None,
+            at,
+            tags: &[],
+            nested: &[],
+            payload: None,
+        },
+    ))?;
+    drop(name);
+
+    let mut data = Vec::new();
+    writer.encode(&mut data)?;
+    let (_, block) = renamed_bloch::parse::block::parse_single(&data)?;
+    assert_eq!(
+        &*block.col_names,
+        &["level", "id", "name", "at", "tags", "nested", "payload"]
+    );
+    let levels = Level::rows(&block)?
+        .map(|row| row.map(|row| row.level))
+        .collect::<renamed_bloch::Result<Vec<_>>>()?;
+    assert_eq!(levels, [1, 2]);
+    let mut rows = Sample::rows(&block)?;
+    let first = rows.next().unwrap()?;
+    assert_eq!(first.id, 7);
+    assert_eq!(first.name, Some("owned"));
+    assert_eq!(first.at.timestamp(), 1_700_000_000);
+    assert_eq!(first.tags.try_collect_vec()?, ["x", "", "x"]);
+    let nested = first
+        .nested
+        .map(|inner| inner?.try_collect_vec())
+        .collect::<renamed_bloch::Result<Vec<_>>>()?;
+    assert_eq!(nested, [vec![1, 2], vec![]]);
+    assert!(matches!(first.payload, Some(Payload::Integer(3))));
+    let second = rows.next().unwrap()?;
+    assert_eq!(second.name, None);
+    assert_eq!(second.tags.count(), 0);
+    assert!(second.payload.is_none());
+    assert!(rows.next().is_none());
+    Ok(())
+}
