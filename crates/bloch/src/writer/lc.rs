@@ -21,10 +21,12 @@ pub trait LcDictionaryKeyDefault: Hash + Eq {
 }
 
 pub trait LcKey: Copy {
+    /// Owned key stored in the dictionary.
     type Key: LcDictionaryKeyDefault + Borrow<Self::Lookup>;
+    /// Borrowed form the dictionary is probed with.
     type Lookup: Hash + Eq + ?Sized;
-    type Value: Borrow<Self::Lookup> + Into<Self::Key> + Copy;
-    fn lc_key(self) -> Self::Value;
+    fn lookup(self) -> impl Borrow<Self::Lookup>;
+    fn key(self) -> Self::Key;
 }
 
 macro_rules! lc_key {
@@ -37,8 +39,10 @@ macro_rules! lc_key {
         impl LcKey for $t {
             type Key = Self;
             type Lookup = Self;
-            type Value = Self;
-            fn lc_key(self) -> Self {
+            fn lookup(self) -> impl Borrow<Self> {
+                self
+            }
+            fn key(self) -> Self {
                 self
             }
         }
@@ -47,8 +51,10 @@ macro_rules! lc_key {
         impl LcKey for $t {
             type Key = $key;
             type Lookup = $key;
-            type Value = $key;
-            fn lc_key(self) -> $key {
+            fn lookup(self) -> impl Borrow<$key> {
+                self.key()
+            }
+            fn key(self) -> $key {
                 let $v = self;
                 $expr
             }
@@ -105,27 +111,33 @@ impl LcDictionaryKeyDefault for Box<[u8]> {
 impl LcKey for &str {
     type Key = Box<str>;
     type Lookup = str;
-    type Value = Self;
-    fn lc_key(self) -> Self {
+    fn lookup(self) -> impl Borrow<str> {
         self
+    }
+    fn key(self) -> Box<str> {
+        self.into()
     }
 }
 
-impl<'a> LcKey for &'a bstr::BStr {
+impl LcKey for &bstr::BStr {
     type Key = Box<[u8]>;
     type Lookup = [u8];
-    type Value = &'a [u8];
-    fn lc_key(self) -> &'a [u8] {
-        self
+    fn lookup(self) -> impl Borrow<[u8]> {
+        <&[u8]>::from(self)
+    }
+    fn key(self) -> Box<[u8]> {
+        <&[u8]>::from(self).into()
     }
 }
 
 impl LcKey for &[u8] {
     type Key = Box<[u8]>;
     type Lookup = [u8];
-    type Value = Self;
-    fn lc_key(self) -> Self {
+    fn lookup(self) -> impl Borrow<[u8]> {
         self
+    }
+    fn key(self) -> Box<[u8]> {
+        self.into()
     }
 }
 
@@ -158,23 +170,6 @@ impl<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
         }
     }
 
-    fn insert<Q>(&mut self, key: &Q, own_key: impl FnOnce() -> Key) -> Result<bool>
-    where
-        Key: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        let (index, inserted) = match self.slots.get(key) {
-            Some(&index) => (index, false),
-            None => {
-                let index = u32::try_from(self.slots.len() + usize::from(self.nullable))?;
-                self.slots.insert(own_key(), index);
-                (index, true)
-            }
-        };
-        self.indices.push(index);
-        Ok(inserted)
-    }
-
     fn write<V>(
         &mut self,
         value: V,
@@ -184,11 +179,14 @@ impl<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
         V: LcKey<Key = Key>,
         Key: Borrow<V::Lookup>,
     {
-        let key = value.lc_key();
-        if self.insert::<V::Lookup>(key.borrow(), || key.into())? {
-            write_key(&mut self.keys, value)?;
+        if let Some(&index) = self.slots.get(value.lookup().borrow()) {
+            self.indices.push(index);
+            return Ok(());
         }
-        Ok(())
+        let index = u32::try_from(self.slots.len() + usize::from(self.nullable))?;
+        self.slots.insert(value.key(), index);
+        self.indices.push(index);
+        write_key(&mut self.keys, value)
     }
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
