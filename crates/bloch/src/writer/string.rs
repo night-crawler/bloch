@@ -4,7 +4,8 @@ use std::io::{self, Write};
 use bstr::BStr;
 
 use super::{
-    ColumnWriter, ConstSizeType, ConstSizeWriter, Writable, WriteColumn, WriteValue, write_string,
+    ColumnWriter, DefaultWriter, FixedWidth, FixedWidthColumn, FromReader, ValueWriter,
+    write_string,
 };
 use crate::{Error, Result, reader};
 
@@ -16,7 +17,7 @@ macro_rules! strings {
         }
 
         impl ColumnWriter for $writer {
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 out.push_str("String");
             }
 
@@ -28,7 +29,7 @@ macro_rules! strings {
                 out.write_all(&self.data)
             }
 
-            fn write_default(&mut self) {
+            fn push_default(&mut self) {
                 self.data.push(0);
             }
 
@@ -41,7 +42,7 @@ macro_rules! strings {
             }
         }
 
-        impl WriteValue for $writer {
+        impl ValueWriter for $writer {
             type Value<'a> = $value;
 
             fn write(&mut self, value: Self::Value<'_>) -> Result<()> {
@@ -51,12 +52,12 @@ macro_rules! strings {
         }
 
         $(
-            impl<'a> Writable<'a> for reader::$reader<'a> {
+            impl<'a> DefaultWriter<'a> for reader::$reader<'a> {
                 type Writer = $writer;
             }
 
-            impl<'a> WriteColumn<'a, reader::$reader<'a>> for $writer {
-                fn for_reader(_reader: &reader::$reader<'a>) -> Self {
+            impl<'a> FromReader<'a, reader::$reader<'a>> for $writer {
+                fn from_reader(_reader: &reader::$reader<'a>) -> Self {
                     Self::default()
                 }
 
@@ -74,20 +75,20 @@ strings! {
 }
 
 macro_rules! fixed_strings {
-    ($($ty:ident: $value:ty => [$($reader:ident: $item:ty),+];)+) => {$(
+    ($($fixed:ident: $value:ty => [$($reader:ident: $item:ty),+];)+) => {$(
         #[derive(Clone, Copy)]
-        pub struct $ty {
+        pub struct $fixed {
             pub size: usize,
         }
 
-        impl ConstSizeType for $ty {
+        impl FixedWidth for $fixed {
             type Value<'a> = $value;
 
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 let _ = write!(out, "FixedString({})", self.size);
             }
 
-            fn value_size(&self) -> usize {
+            fn width(&self) -> usize {
                 self.size
             }
 
@@ -103,14 +104,14 @@ macro_rules! fixed_strings {
         }
 
         $(
-            impl<'a> Writable<'a> for reader::$reader<'a> {
-                type Writer = ConstSizeWriter<$ty>;
+            impl<'a> DefaultWriter<'a> for reader::$reader<'a> {
+                type Writer = FixedWidthColumn<$fixed>;
             }
 
-            impl<'a> WriteColumn<'a, reader::$reader<'a>> for ConstSizeWriter<$ty> {
-                fn for_reader(reader: &reader::$reader<'a>) -> Self {
+            impl<'a> FromReader<'a, reader::$reader<'a>> for FixedWidthColumn<$fixed> {
+                fn from_reader(reader: &reader::$reader<'a>) -> Self {
                     let size = reader.0.size;
-                    Self::new($ty { size })
+                    Self::new($fixed { size })
                 }
 
                 fn write_item(&mut self, item: $item) -> Result<()> {

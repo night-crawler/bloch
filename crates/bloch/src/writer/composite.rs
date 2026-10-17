@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-    ColumnWriter, ElementWriters, VariantName, Writable, WriteColumn, WriteValue, WriteVariant,
+    ColumnTuple, ColumnWriter, DefaultWriter, FromReader, IntoVariant, ValueWriter, VariantValue,
     write_offsets,
 };
 use crate::{Result, reader};
@@ -30,9 +30,9 @@ impl<Inner: ColumnWriter + Default> Default for Nullable<Inner> {
 }
 
 impl<Inner: ColumnWriter> ColumnWriter for Nullable<Inner> {
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         out.push_str("Nullable(");
-        self.inner.write_type_name(out);
+        self.inner.type_name(out);
         out.push(')');
     }
 
@@ -45,9 +45,9 @@ impl<Inner: ColumnWriter> ColumnWriter for Nullable<Inner> {
         self.inner.write_data(out)
     }
 
-    fn write_default(&mut self) {
+    fn push_default(&mut self) {
         self.nulls.push(1);
-        self.inner.write_default();
+        self.inner.push_default();
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -65,15 +65,15 @@ impl<Inner: ColumnWriter> ColumnWriter for Nullable<Inner> {
     }
 }
 
-impl<'a, Inner: Writable<'a> + 'a> Writable<'a> for reader::Nullable<'a, Inner> {
+impl<'a, Inner: DefaultWriter<'a> + 'a> DefaultWriter<'a> for reader::Nullable<'a, Inner> {
     type Writer = Nullable<Inner::Writer>;
 }
 
-impl<'a, Inner: Writable<'a> + 'a> WriteColumn<'a, reader::Nullable<'a, Inner>>
+impl<'a, Inner: DefaultWriter<'a> + 'a> FromReader<'a, reader::Nullable<'a, Inner>>
     for Nullable<Inner::Writer>
 {
-    fn for_reader(reader: &reader::Nullable<'a, Inner>) -> Self {
-        Self::new(Inner::Writer::for_reader(&reader.inner))
+    fn from_reader(reader: &reader::Nullable<'a, Inner>) -> Self {
+        Self::new(Inner::Writer::from_reader(&reader.inner))
     }
 
     fn write_item(&mut self, item: Option<Inner::Item>) -> Result<()> {
@@ -83,14 +83,14 @@ impl<'a, Inner: Writable<'a> + 'a> WriteColumn<'a, reader::Nullable<'a, Inner>>
                 self.inner.write_item(value)
             }
             None => {
-                self.write_default();
+                self.push_default();
                 Ok(())
             }
         }
     }
 }
 
-impl<Inner: WriteValue> WriteValue for Nullable<Inner> {
+impl<Inner: ValueWriter> ValueWriter for Nullable<Inner> {
     type Value<'a> = Option<Inner::Value<'a>>;
 
     fn write(&mut self, value: Option<Inner::Value<'_>>) -> Result<()> {
@@ -100,7 +100,7 @@ impl<Inner: WriteValue> WriteValue for Nullable<Inner> {
                 self.inner.write(value)
             }
             None => {
-                self.write_default();
+                self.push_default();
                 Ok(())
             }
         }
@@ -125,7 +125,7 @@ impl<Values: ColumnWriter> Array<Values> {
         values: impl IntoIterator<Item = Values::Value<'a>>,
     ) -> Result<()>
     where
-        Values: WriteValue,
+        Values: ValueWriter,
     {
         self.write_with(values, Values::write)
     }
@@ -152,9 +152,9 @@ impl<Values: ColumnWriter + Default> Default for Array<Values> {
 }
 
 impl<Values: ColumnWriter> ColumnWriter for Array<Values> {
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         out.push_str("Array(");
-        self.values.write_type_name(out);
+        self.values.type_name(out);
         out.push(')');
     }
 
@@ -167,7 +167,7 @@ impl<Values: ColumnWriter> ColumnWriter for Array<Values> {
         self.values.write_data(out)
     }
 
-    fn write_default(&mut self) {
+    fn push_default(&mut self) {
         self.offsets.push(self.offsets.last().copied().unwrap_or(0));
     }
 
@@ -186,15 +186,15 @@ impl<Values: ColumnWriter> ColumnWriter for Array<Values> {
     }
 }
 
-impl<'a, Inner: Writable<'a> + 'a> Writable<'a> for reader::Array<'a, Inner> {
+impl<'a, Inner: DefaultWriter<'a> + 'a> DefaultWriter<'a> for reader::Array<'a, Inner> {
     type Writer = Array<Inner::Writer>;
 }
 
-impl<'a, Inner: Writable<'a> + 'a> WriteColumn<'a, reader::Array<'a, Inner>>
+impl<'a, Inner: DefaultWriter<'a> + 'a> FromReader<'a, reader::Array<'a, Inner>>
     for Array<Inner::Writer>
 {
-    fn for_reader(reader: &reader::Array<'a, Inner>) -> Self {
-        let mut values = Inner::Writer::for_reader(&reader.values);
+    fn from_reader(reader: &reader::Array<'a, Inner>) -> Self {
+        let mut values = Inner::Writer::from_reader(&reader.values);
         values.reserve(reader.values.len());
         Self::new(values)
     }
@@ -204,9 +204,9 @@ impl<'a, Inner: Writable<'a> + 'a> WriteColumn<'a, reader::Array<'a, Inner>>
     }
 }
 
-impl<Values> WriteValue for Array<Values>
+impl<Values> ValueWriter for Array<Values>
 where
-    Values: WriteValue,
+    Values: ValueWriter,
     for<'a> Values::Value<'a>: Copy,
 {
     type Value<'a> = &'a [Values::Value<'a>];
@@ -239,11 +239,11 @@ impl<Keys: ColumnWriter + Default, Values: ColumnWriter + Default> Default for M
 }
 
 impl<Keys: ColumnWriter, Values: ColumnWriter> ColumnWriter for Map<Keys, Values> {
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         out.push_str("Map(");
-        self.keys.write_type_name(out);
+        self.keys.type_name(out);
         out.push(',');
-        self.values.write_type_name(out);
+        self.values.type_name(out);
         out.push(')');
     }
 
@@ -258,7 +258,7 @@ impl<Keys: ColumnWriter, Values: ColumnWriter> ColumnWriter for Map<Keys, Values
         self.values.write_data(out)
     }
 
-    fn write_default(&mut self) {
+    fn push_default(&mut self) {
         self.offsets.push(self.offsets.last().copied().unwrap_or(0));
     }
 
@@ -278,23 +278,23 @@ impl<Keys: ColumnWriter, Values: ColumnWriter> ColumnWriter for Map<Keys, Values
     }
 }
 
-impl<'a, K, V> Writable<'a> for reader::Map<'a, K, V>
+impl<'a, K, V> DefaultWriter<'a> for reader::Map<'a, K, V>
 where
-    K: Writable<'a> + 'a,
-    V: Writable<'a> + 'a,
+    K: DefaultWriter<'a> + 'a,
+    V: DefaultWriter<'a> + 'a,
 {
     type Writer = Map<K::Writer, V::Writer>;
 }
 
-impl<'a, K, V> WriteColumn<'a, reader::Map<'a, K, V>> for Map<K::Writer, V::Writer>
+impl<'a, K, V> FromReader<'a, reader::Map<'a, K, V>> for Map<K::Writer, V::Writer>
 where
-    K: Writable<'a> + 'a,
-    V: Writable<'a> + 'a,
+    K: DefaultWriter<'a> + 'a,
+    V: DefaultWriter<'a> + 'a,
 {
-    fn for_reader(reader: &reader::Map<'a, K, V>) -> Self {
-        let mut keys = K::Writer::for_reader(&reader.keys);
+    fn from_reader(reader: &reader::Map<'a, K, V>) -> Self {
+        let mut keys = K::Writer::from_reader(&reader.keys);
         keys.reserve(reader.keys.len());
-        let mut values = V::Writer::for_reader(&reader.values);
+        let mut values = V::Writer::from_reader(&reader.values);
         values.reserve(reader.values.len());
         Self::new(keys, values)
     }
@@ -312,10 +312,10 @@ where
     }
 }
 
-impl<Keys, Values> WriteValue for Map<Keys, Values>
+impl<Keys, Values> ValueWriter for Map<Keys, Values>
 where
-    Keys: WriteValue,
-    Values: WriteValue,
+    Keys: ValueWriter,
+    Values: ValueWriter,
     for<'a> Keys::Value<'a>: Copy,
     for<'a> Values::Value<'a>: Copy,
 {
@@ -336,11 +336,11 @@ where
 
 macro_rules! tuples {
     ($($idx:tt => $t:ident),+) => {
-        impl<$($t: ColumnWriter,)+> ElementWriters for ($($t,)+) {
-            fn write_type_names(&self, out: &mut Vec<String>) {
+        impl<$($t: ColumnWriter,)+> ColumnTuple for ($($t,)+) {
+            fn type_names(&self, out: &mut Vec<String>) {
                 $(
                     let mut name = String::new();
-                    self.$idx.write_type_name(&mut name);
+                    self.$idx.type_name(&mut name);
                     out.push(name);
                 )+
             }
@@ -355,8 +355,8 @@ macro_rules! tuples {
                 Ok(())
             }
 
-            fn write_default(&mut self) {
-                $(self.$idx.write_default();)+
+            fn push_default(&mut self) {
+                $(self.$idx.push_default();)+
             }
 
             fn reserve(&mut self, rows: usize) {
@@ -374,48 +374,48 @@ macro_rules! tuples {
         }
 
         impl<$($t: ColumnWriter,)+> ColumnWriter for ($($t,)+) {
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 let mut names = Vec::new();
-                self.write_type_names(&mut names);
+                self.type_names(&mut names);
                 out.push_str("Tuple(");
                 out.push_str(&names.join(","));
                 out.push(')');
             }
 
             fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
-                ElementWriters::write_prefix(self, out)
+                ColumnTuple::write_prefix(self, out)
             }
 
             fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
-                ElementWriters::write_data(self, out)
+                ColumnTuple::write_data(self, out)
             }
 
-            fn write_default(&mut self) {
-                ElementWriters::write_default(self);
+            fn push_default(&mut self) {
+                ColumnTuple::push_default(self);
             }
 
             fn reserve(&mut self, rows: usize) {
-                ElementWriters::reserve(self, rows);
+                ColumnTuple::reserve(self, rows);
             }
 
             fn clear(&mut self) {
-                ElementWriters::clear(self);
+                ColumnTuple::clear(self);
             }
 
             fn flush(&mut self) -> Result<()> {
-                ElementWriters::flush(self)
+                ColumnTuple::flush(self)
             }
         }
 
-        impl<'a, $($t: Writable<'a> + 'a,)+> Writable<'a> for reader::Tuple<($($t,)+)> {
+        impl<'a, $($t: DefaultWriter<'a> + 'a,)+> DefaultWriter<'a> for reader::Tuple<($($t,)+)> {
             type Writer = ($($t::Writer,)+);
         }
 
-        impl<'a, $($t: Writable<'a> + 'a,)+> WriteColumn<'a, reader::Tuple<($($t,)+)>>
+        impl<'a, $($t: DefaultWriter<'a> + 'a,)+> FromReader<'a, reader::Tuple<($($t,)+)>>
             for ($($t::Writer,)+)
         {
-            fn for_reader(reader: &reader::Tuple<($($t,)+)>) -> Self {
-                ($($t::Writer::for_reader(&reader.0.$idx),)+)
+            fn from_reader(reader: &reader::Tuple<($($t,)+)>) -> Self {
+                ($($t::Writer::from_reader(&reader.0.$idx),)+)
             }
 
             fn write_item(&mut self, item: ($($t::Item,)+)) -> Result<()> {
@@ -424,7 +424,7 @@ macro_rules! tuples {
             }
         }
 
-        impl<$($t: WriteValue,)+> WriteValue for ($($t,)+) {
+        impl<$($t: ValueWriter,)+> ValueWriter for ($($t,)+) {
             type Value<'a> = ($($t::Value<'a>,)+);
 
             fn write(&mut self, value: Self::Value<'_>) -> Result<()> {
@@ -446,44 +446,44 @@ tuples!(0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H);
 tuples!(0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H, 8 => I);
 tuples!(0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H, 8 => I, 9 => J);
 
-pub struct Variant<W: ElementWriters, N: VariantName> {
+pub struct Variant<C: ColumnTuple, V: VariantValue> {
     discriminators: Vec<u8>,
-    writers: W,
-    name: PhantomData<fn() -> N>,
+    columns: C,
+    marker: PhantomData<fn() -> V>,
 }
 
-impl<W: ElementWriters, N: VariantName> Variant<W, N> {
-    pub const fn new(writers: W) -> Self {
+impl<C: ColumnTuple, V: VariantValue> Variant<C, V> {
+    pub const fn new(columns: C) -> Self {
         Self {
             discriminators: Vec::new(),
-            writers,
-            name: PhantomData,
+            columns,
+            marker: PhantomData,
         }
     }
 
-    fn write_variant<'a>(&mut self, value: impl WriteVariant<'a, Writers = W>) -> Result<()> {
-        let discriminator = value.write(&mut self.writers)?;
+    fn push<'a>(&mut self, value: impl IntoVariant<'a, Columns = C>) -> Result<()> {
+        let discriminator = value.write(&mut self.columns)?;
         self.discriminators.push(discriminator);
         Ok(())
     }
 }
 
-impl<W: ElementWriters + Default, N: VariantName> Default for Variant<W, N> {
+impl<C: ColumnTuple + Default, V: VariantValue> Default for Variant<C, V> {
     fn default() -> Self {
-        Self::new(W::default())
+        Self::new(C::default())
     }
 }
 
-impl<W: ElementWriters, N: VariantName> ColumnWriter for Variant<W, N> {
+impl<C: ColumnTuple, V: VariantValue> ColumnWriter for Variant<C, V> {
     /// Panics unless the elements are declared in ClickHouse's order (sorted by type name),
     /// as the discriminators would otherwise name the wrong elements.
-    fn write_type_name(&self, out: &mut String) {
-        if let Some(name) = N::TYPE_NAME {
+    fn type_name(&self, out: &mut String) {
+        if let Some(name) = V::TYPE_NAME {
             out.push_str(name);
             return;
         }
         let mut names = Vec::new();
-        self.writers.write_type_names(&mut names);
+        self.columns.type_names(&mut names);
         assert!(
             names.is_sorted(),
             "declare enum variants sorted by ClickHouse type name, not as Variant({})",
@@ -496,83 +496,83 @@ impl<W: ElementWriters, N: VariantName> ColumnWriter for Variant<W, N> {
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&0u64.to_le_bytes())?;
-        self.writers.write_prefix(out)
+        self.columns.write_prefix(out)
     }
 
     fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&self.discriminators)?;
-        self.writers.write_data(out)
+        self.columns.write_data(out)
     }
 
-    fn write_default(&mut self) {
+    fn push_default(&mut self) {
         self.discriminators
             .push(crate::mark::Variant::NULL_DISCRIMINATOR);
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.writers.flush()
+        self.columns.flush()
     }
 
     fn reserve(&mut self, rows: usize) {
         self.discriminators.reserve(rows);
-        self.writers.reserve(rows);
+        self.columns.reserve(rows);
     }
 
     fn clear(&mut self) {
         self.discriminators.clear();
-        self.writers.clear();
+        self.columns.clear();
     }
 }
 
-impl<'a, T: WriteVariant<'a> + 'a> Writable<'a> for reader::Variant<'a, T> {
-    type Writer = Variant<T::Writers, T::Name>;
+impl<'a, T: IntoVariant<'a> + 'a> DefaultWriter<'a> for reader::Variant<'a, T> {
+    type Writer = Variant<T::Columns, T::Marker>;
 }
 
-impl<'a, T: WriteVariant<'a> + 'a> WriteColumn<'a, reader::Variant<'a, T>>
-    for Variant<T::Writers, T::Name>
+impl<'a, T: IntoVariant<'a> + 'a> FromReader<'a, reader::Variant<'a, T>>
+    for Variant<T::Columns, T::Marker>
 {
-    fn for_reader(reader: &reader::Variant<'a, T>) -> Self {
-        Self::new(T::writers(&reader.readers))
+    fn from_reader(reader: &reader::Variant<'a, T>) -> Self {
+        Self::new(T::columns(&reader.readers))
     }
 
     fn write_item(&mut self, item: T) -> Result<()> {
-        self.write_variant(item)
+        self.push(item)
     }
 }
 
-impl<'a, T: WriteVariant<'a> + 'a> Writable<'a> for reader::VariantNullable<'a, T> {
-    type Writer = Variant<T::Writers, T::Name>;
+impl<'a, T: IntoVariant<'a> + 'a> DefaultWriter<'a> for reader::VariantNullable<'a, T> {
+    type Writer = Variant<T::Columns, T::Marker>;
 }
 
-impl<'a, T: WriteVariant<'a> + 'a> WriteColumn<'a, reader::VariantNullable<'a, T>>
-    for Variant<T::Writers, T::Name>
+impl<'a, T: IntoVariant<'a> + 'a> FromReader<'a, reader::VariantNullable<'a, T>>
+    for Variant<T::Columns, T::Marker>
 {
-    fn for_reader(reader: &reader::VariantNullable<'a, T>) -> Self {
-        Self::new(T::writers(&reader.inner.readers))
+    fn from_reader(reader: &reader::VariantNullable<'a, T>) -> Self {
+        Self::new(T::columns(&reader.inner.readers))
     }
 
     fn write_item(&mut self, item: Option<T>) -> Result<()> {
         match item {
-            Some(value) => self.write_variant(value),
+            Some(value) => self.push(value),
             None => {
-                self.write_default();
+                self.push_default();
                 Ok(())
             }
         }
     }
 }
 
-impl<W: ElementWriters, N: VariantName> WriteValue for Variant<W, N>
+impl<C: ColumnTuple, V: VariantValue> ValueWriter for Variant<C, V>
 where
-    for<'a> N::Value<'a>: WriteVariant<'a, Writers = W>,
+    for<'a> V::Value<'a>: IntoVariant<'a, Columns = C>,
 {
-    type Value<'a> = Option<N::Value<'a>>;
+    type Value<'a> = Option<V::Value<'a>>;
 
-    fn write(&mut self, value: Option<N::Value<'_>>) -> Result<()> {
+    fn write(&mut self, value: Option<V::Value<'_>>) -> Result<()> {
         match value {
-            Some(value) => self.write_variant(value),
+            Some(value) => self.push(value),
             None => {
-                self.write_default();
+                self.push_default();
                 Ok(())
             }
         }

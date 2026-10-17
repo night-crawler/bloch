@@ -45,10 +45,10 @@ fn assert_same_values(expected: &ParsedBlock<'_>, actual: &ParsedBlock<'_>) {
 fn round_trip<'a, R>(block: &'a ParsedBlock<'a>) -> Vec<u8>
 where
     R: FromBlock<'a>,
-    R::Item: WriteRow<Reader = R>,
+    R::Item: Row<Reader = R>,
 {
     let mut writer =
-        BlockWriter::<<R::Item as WriteRow>::Writer>::for_reader(&R::from_block(block).unwrap());
+        BlockWriter::<<R::Item as Row>::Writer>::from_reader(&R::from_block(block).unwrap());
     writer.reserve(block.num_rows);
     for row in R::rows(block).unwrap() {
         writer.write(row.unwrap()).unwrap();
@@ -67,7 +67,7 @@ fn single_column_block(name: &str, writer: &mut dyn ColumnWriter, rows: usize) -
 
 fn type_name(writer: &dyn ColumnWriter) -> String {
     let mut name = String::new();
-    writer.write_type_name(&mut name);
+    writer.type_name(&mut name);
     name
 }
 
@@ -139,7 +139,7 @@ fn encode_streams_into_a_compressing_writer() {
     let plain = round_trip::<Sample<'_>>(&source);
 
     let reader = Sample::from_block(&source).unwrap();
-    let mut writer = BlockWriter::<<SampleItem<'_> as WriteRow>::Writer>::for_reader(&reader);
+    let mut writer = BlockWriter::<<SampleItem<'_> as Row>::Writer>::from_reader(&reader);
     for row in Sample::rows(&source).unwrap() {
         writer.write(row.unwrap()).unwrap();
     }
@@ -154,7 +154,7 @@ fn encode_streams_into_a_compressing_writer() {
     assert_eq!(inflated, plain);
 }
 
-#[derive(crate::FromVariant, crate::WriteVariant)]
+#[derive(crate::FromVariant, crate::IntoVariant)]
 enum Payload<'a> {
     Array(reader::ArrayIter<'a, reader::I64<'a>>),
     Int(i64),
@@ -235,7 +235,7 @@ fn enum_writer_owns_names_after_reader_and_rows_drop() {
                 (row.e8.to_owned(), row.e16.to_owned())
             })
             .collect::<Vec<_>>();
-        (BlockWriter::for_reader(&reader), expected)
+        (BlockWriter::from_reader(&reader), expected)
     };
     for (e8, e16) in expected.clone() {
         writer.write(EnumRowItem { e8: &e8, e16: &e16 }).unwrap();
@@ -273,7 +273,7 @@ fn geometry_is_spelled_by_its_alias_and_keeps_fixed_discriminators() {
     assert_eq!(round_trip::<GeometryRow<'_>>(&output), encoded);
 }
 
-#[derive(crate::FromVariant, crate::WriteVariant)]
+#[derive(crate::FromVariant, crate::IntoVariant)]
 enum Unsorted<'a> {
     Str(&'a str),
     Int(i64),
@@ -289,7 +289,7 @@ struct UnsortedRow<'a> {
 #[test]
 #[should_panic(expected = "sorted by ClickHouse type name")]
 fn variant_elements_must_be_declared_in_clickhouse_order() {
-    encode(BlockWriter::<<UnsortedRowItem<'_> as WriteRow>::Writer>::new()).unwrap();
+    encode(BlockWriter::<<UnsortedRowItem<'_> as Row>::Writer>::new()).unwrap();
 }
 
 #[derive(FromBlock, WriteBlock, Copy, Clone)]
@@ -299,7 +299,7 @@ struct LcRow<'a> {
 
 #[test]
 fn low_cardinality_index_width_follows_dictionary_size() {
-    let mut writer = BlockWriter::<<LcRowItem<'_> as WriteRow>::Writer>::with_capacity(65_538);
+    let mut writer = BlockWriter::<<LcRowItem<'_> as Row>::Writer>::with_capacity(65_538);
     for (dictionary_size, width) in [(256, 1), (257, 2), (65_536, 2), (65_537, 4)] {
         writer.write(LcRowItem { value: "" }).unwrap();
         for index in 1..dictionary_size {
@@ -349,8 +349,8 @@ struct HashedLcRow<'a> {
 #[test]
 fn low_cardinality_hasher_is_selectable() {
     let rows = ["b", "a", "b", ""];
-    let mut fx = BlockWriter::<<LcRowItem<'_> as WriteRow>::Writer>::new();
-    let mut random = BlockWriter::<<HashedLcRowItem<'_> as WriteRow>::Writer>::new();
+    let mut fx = BlockWriter::<<LcRowItem<'_> as Row>::Writer>::new();
+    let mut random = BlockWriter::<<HashedLcRowItem<'_> as Row>::Writer>::new();
     for value in rows {
         fx.write(LcRowItem { value }).unwrap();
         random.write(HashedLcRowItem { value }).unwrap();
@@ -366,23 +366,19 @@ struct MapRow<'a> {
 
 #[test]
 fn empty_block_has_types_only_and_empty_maps_keep_prefixes() {
-    let empty = encode(BlockWriter::<<MapRowItem<'_> as WriteRow>::Writer>::new()).unwrap();
+    let empty = encode(BlockWriter::<<MapRowItem<'_> as Row>::Writer>::new()).unwrap();
     assert_eq!(parse(&empty).num_rows, 0);
     assert_eq!(
         empty,
-        single_column_block(
-            "m",
-            &mut <MapRowItem<'_> as WriteRow>::Writer::default().map,
-            0
-        )
+        single_column_block("m", &mut <MapRowItem<'_> as Row>::Writer::default().map, 0)
     );
 
-    let mut columns = <MapRowItem<'_> as WriteRow>::Writer::default();
-    columns.map.write_default();
-    columns.map.write_default();
+    let mut columns = <MapRowItem<'_> as Row>::Writer::default();
+    columns.map.push_default();
+    columns.map.push_default();
     let bytes = single_column_block("m", &mut columns.map, 2);
     let block = parse(&bytes);
-    let mut writer = BlockWriter::<<MapRowItem<'_> as WriteRow>::Writer>::new();
+    let mut writer = BlockWriter::<<MapRowItem<'_> as Row>::Writer>::new();
     for row in MapRow::rows(&block).unwrap() {
         let row = row.unwrap();
         assert_eq!(row.map.len(), 0);
@@ -408,7 +404,7 @@ fn row_error_invalidates_the_block() {
     let bad_row = MapRow::from_block(&bad).unwrap().try_read(last).unwrap();
     assert_eq!(bad_row.map.len(), 1);
 
-    let mut writer = BlockWriter::<<MapRowItem<'_> as WriteRow>::Writer>::new();
+    let mut writer = BlockWriter::<<MapRowItem<'_> as Row>::Writer>::new();
     for row in MapRow::rows(&good).unwrap().take(last) {
         writer.write(row.unwrap()).unwrap();
     }
@@ -439,7 +435,7 @@ fn row_error_invalidates_the_block() {
 fn writer_is_reusable_after_encode() {
     let source = parse(include_bytes!("../../testdata/writer_sample.native"));
     let reader = Sample::from_block(&source).unwrap();
-    let mut writer = BlockWriter::<<SampleItem<'_> as WriteRow>::Writer>::for_reader(&reader);
+    let mut writer = BlockWriter::<<SampleItem<'_> as Row>::Writer>::from_reader(&reader);
     let mut blocks = Vec::new();
     for _ in 0..2 {
         for row in Sample::rows(&source).unwrap() {
@@ -468,7 +464,7 @@ fn low_cardinality_owns_short_lived_values_and_reuses_dictionaries() {
     let date = |i: usize| {
         chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap() + chrono::Days::new((i % 50) as u64)
     };
-    let mut writer = BlockWriter::<<OwnedLcRowItem<'_> as WriteRow>::Writer>::new();
+    let mut writer = BlockWriter::<<OwnedLcRowItem<'_> as Row>::Writer>::new();
     for pass in 0..2 {
         for i in 0..rows {
             let value = format!("v{pass}-{}", i % 300);
@@ -518,7 +514,7 @@ fn low_cardinality_owns_short_lived_values_and_reuses_dictionaries() {
 /// Dictionary conversion happens within `write`, and a failed value invalidates the block.
 #[test]
 fn low_cardinality_value_error_fails_the_block_at_write() {
-    let mut writer = BlockWriter::<<OwnedLcRowItem<'_> as WriteRow>::Writer>::new();
+    let mut writer = BlockWriter::<<OwnedLcRowItem<'_> as Row>::Writer>::new();
     let row = |d| OwnedLcRowItem { s: "a", n: None, d };
     let ok = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
     writer.write(row(ok)).unwrap();
@@ -554,8 +550,8 @@ fn low_cardinality_owns_non_utf8_bytes_and_clears() {
             let [lo, hi] = u16::try_from(i % 300).unwrap().to_le_bytes();
             let value = vec![0xff, pass, lo, hi];
             let value = bstr::BStr::new(&value);
-            WriteColumn::<Bytes<'_>>::write_item(&mut writer, value).unwrap();
-            WriteColumn::<NullableBytes<'_>>::write_item(
+            FromReader::<Bytes<'_>>::write_item(&mut writer, value).unwrap();
+            FromReader::<NullableBytes<'_>>::write_item(
                 &mut nullable,
                 match i % 13 {
                     0 => None,
@@ -600,7 +596,7 @@ fn low_cardinality_owns_non_utf8_bytes_and_clears() {
 #[test]
 fn low_cardinality_preserves_float_bits() {
     type Floats<'a> = reader::Lc<'a, reader::F64<'a>>;
-    let mut writer = Lc::<ConstSizeWriter<F64>>::default();
+    let mut writer = Lc::<FixedWidthColumn<F64>>::default();
     let bits = [
         0,
         (-0.0_f64).to_bits(),
@@ -609,7 +605,7 @@ fn low_cardinality_preserves_float_bits() {
         0x7ff8_0000_0000_0001,
     ];
     for bits in bits {
-        WriteColumn::<Floats<'_>>::write_item(&mut writer, f64::from_bits(bits)).unwrap();
+        FromReader::<Floats<'_>>::write_item(&mut writer, f64::from_bits(bits)).unwrap();
     }
     let bytes = single_column_block("floats", &mut writer, bits.len());
     let block = parse(&bytes);
@@ -625,12 +621,12 @@ fn low_cardinality_preserves_float_bits() {
 
 #[test]
 fn fixed_string_rejects_long_values() {
-    let mut writer = ConstSizeWriter::with_capacity(FixedStr { size: 2 }, 1);
+    let mut writer = FixedWidthColumn::with_capacity(FixedStr { size: 2 }, 1);
     assert!(matches!(
-        WriteColumn::<reader::FixedStr<'_>>::write_item(&mut writer, "abc"),
+        FromReader::<reader::FixedStr<'_>>::write_item(&mut writer, "abc"),
         Err(Error::FixedStringOverflow(3, 2))
     ));
-    WriteColumn::<reader::FixedStr<'_>>::write_item(&mut writer, "a").unwrap();
+    FromReader::<reader::FixedStr<'_>>::write_item(&mut writer, "a").unwrap();
     let mut data = Vec::new();
     writer.write_data(&mut data).unwrap();
     assert_eq!(data, b"a\0");
@@ -639,29 +635,29 @@ fn fixed_string_rejects_long_values() {
 #[test]
 fn parameterized_type_names_match_clickhouse_spelling() {
     assert_eq!(
-        type_name(&ConstSizeWriter::new(Enum8::new(&[
+        type_name(&FixedWidthColumn::new(Enum8::new(&[
             ("it's", 1),
             ("b\\c", -2)
         ]))),
         r"Enum8('it\'s' = 1, 'b\\c' = -2)"
     );
     assert_eq!(
-        type_name(&ConstSizeWriter::new(DateTime64 {
+        type_name(&FixedWidthColumn::new(DateTime64 {
             precision: 6,
             tz: Some(Tz::Europe__Berlin),
         })),
         "DateTime64(6, 'Europe/Berlin')"
     );
     assert_eq!(
-        type_name(&ConstSizeWriter::<DateTime>::default()),
+        type_name(&FixedWidthColumn::<DateTime>::default()),
         "DateTime"
     );
     assert_eq!(
-        type_name(&ConstSizeWriter::new(Decimal64 { scale: 4 })),
+        type_name(&FixedWidthColumn::new(Decimal64 { scale: 4 })),
         "Decimal(18, 4)"
     );
     assert_eq!(
-        type_name(&ConstSizeWriter::new(Interval {
+        type_name(&FixedWidthColumn::new(Interval {
             kind: interval::Kind::Week,
         })),
         "IntervalWeek"
@@ -670,13 +666,13 @@ fn parameterized_type_names_match_clickhouse_spelling() {
 
 #[test]
 fn values_that_do_not_fit_the_column_are_rejected() {
-    let mut writer = ConstSizeWriter::new(Enum8::new(&[("a", 1)]));
-    assert!(WriteColumn::<reader::Enum8<'_>>::write_item(&mut writer, "b").is_err());
+    let mut writer = FixedWidthColumn::new(Enum8::new(&[("a", 1)]));
+    assert!(FromReader::<reader::Enum8<'_>>::write_item(&mut writer, "b").is_err());
 
-    let mut writer = ConstSizeWriter::new(Decimal32 { scale: 2 });
-    WriteColumn::<reader::Decimal32<'_>>::write_item(&mut writer, Decimal::new(12_345, 3)).unwrap();
+    let mut writer = FixedWidthColumn::new(Decimal32 { scale: 2 });
+    FromReader::<reader::Decimal32<'_>>::write_item(&mut writer, Decimal::new(12_345, 3)).unwrap();
     assert!(
-        WriteColumn::<reader::Decimal32<'_>>::write_item(
+        FromReader::<reader::Decimal32<'_>>::write_item(
             &mut writer,
             Decimal::new(i64::from(i32::MAX), 0)
         )
@@ -687,13 +683,13 @@ fn values_that_do_not_fit_the_column_are_rejected() {
     // 12.345 rounds to 12.35 at scale 2.
     assert_eq!(data, 1235i32.to_le_bytes());
 
-    let mut writer = ConstSizeWriter::new(Interval {
+    let mut writer = FixedWidthColumn::new(Interval {
         kind: interval::Kind::Day,
     });
     assert!(
-        WriteColumn::<reader::Interval<'_>>::write_item(&mut writer, TimeDelta::hours(36)).is_err()
+        FromReader::<reader::Interval<'_>>::write_item(&mut writer, TimeDelta::hours(36)).is_err()
     );
-    WriteColumn::<reader::Interval<'_>>::write_item(&mut writer, TimeDelta::days(-2)).unwrap();
+    FromReader::<reader::Interval<'_>>::write_item(&mut writer, TimeDelta::days(-2)).unwrap();
     let mut data = Vec::new();
     writer.write_data(&mut data).unwrap();
     assert_eq!(data, (-2i64).to_le_bytes());
@@ -701,16 +697,16 @@ fn values_that_do_not_fit_the_column_are_rejected() {
     let before_epoch = chrono::DateTime::from_timestamp(-1, 0)
         .unwrap()
         .with_timezone(&Tz::UTC);
-    let mut writer = ConstSizeWriter::<DateTime>::default();
-    assert!(WriteColumn::<reader::DateTime<'_>>::write_item(&mut writer, before_epoch).is_err());
+    let mut writer = FixedWidthColumn::<DateTime>::default();
+    assert!(FromReader::<reader::DateTime<'_>>::write_item(&mut writer, before_epoch).is_err());
 
     // Precision beyond nanoseconds is an error, not an overflow.
-    let mut writer = ConstSizeWriter::new(DateTime64 {
+    let mut writer = FixedWidthColumn::new(DateTime64 {
         precision: 10,
         tz: None,
     });
     assert!(matches!(
-        WriteColumn::<reader::DateTime64<'_>>::write_item(&mut writer, before_epoch),
+        FromReader::<reader::DateTime64<'_>>::write_item(&mut writer, before_epoch),
         Err(Error::ValueOutOfRange(_, "precision (0..=9)", _))
     ));
 }

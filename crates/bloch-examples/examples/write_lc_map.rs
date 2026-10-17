@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (remaining, block) = parse_single(source)?;
     assert!(remaining.is_empty());
 
-    // WriteBlock implements WriteRow for the generated RowItem. Each write consumes the lazy
+    // WriteBlock implements Row for the generated RowItem. Each write consumes the lazy
     // maps directly; nothing is collected in between.
     let mut writer = BlockWriter::with_capacity(block.num_rows);
     for item in Row::rows(&block)? {

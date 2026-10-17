@@ -3,7 +3,7 @@ use std::hint::cold_path;
 use super::{Array, ArrayIter, F64, TryRead, Tuple};
 use crate::error::Error;
 use crate::mark::Mark;
-use crate::{FromVariant, WriteVariant};
+use crate::{FromVariant, IntoVariant};
 
 /// Geo types are stored as tuples and arrays; the newtype keeps the declared type name so a
 /// writer can emit it again.
@@ -64,7 +64,7 @@ geo! {
     clippy::large_enum_variant,
     reason = "readers are borrowed views; boxing would allocate per row"
 )]
-#[derive(FromVariant, WriteVariant)]
+#[derive(FromVariant, IntoVariant)]
 #[col(type_name = "Geometry")]
 pub enum Geometry<'a> {
     #[col(reader = LineString<'a>)]

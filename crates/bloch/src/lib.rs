@@ -27,7 +27,7 @@ pub mod value;
 pub mod writer;
 pub mod zc;
 
-pub use bloch_derive::{FromBlock, FromVariant, WriteBlock, WriteVariant};
+pub use bloch_derive::{FromBlock, FromVariant, IntoVariant, WriteBlock};
 pub use bstr::BStr;
 pub use error::Error;
 pub use interval::Interval;
@@ -300,7 +300,7 @@ impl<'a> ParsedBlock<'a> {
 /// Builds one uncompressed Native block from `*Item` rows.
 ///
 /// ```ignore
-/// let mut writer = BlockWriter::for_reader(&source);
+/// let mut writer = BlockWriter::from_reader(&source);
 /// for block in blocks {
 ///     for row in block { writer.write(row)?; }
 ///     writer.encode(&mut out)?;
@@ -310,7 +310,7 @@ impl<'a> ParsedBlock<'a> {
 /// [`Self::encode`] leaves the writer empty with its buffers and dictionary tables allocated,
 /// so one writer serves a whole stream of blocks without reallocating.
 ///
-/// Built-in column writers own retained values. Each [`Self::write`] call may borrow
+/// Built-in column columns own retained values. Each [`Self::write`] call may borrow
 /// from a different input row; that input can be dropped before the next write or encode.
 ///
 /// A row that fails to write leaves the block invalid: later writes and [`Self::encode`]
@@ -347,12 +347,12 @@ impl<W: writer::RowWriter> BlockWriter<W> {
 
     /// A writer with the source's column parameters (FixedString sizes, time zones, ...),
     /// sized for the source block: its rows, array elements and dictionary entries.
-    pub fn for_reader<'a, Reader>(reader: &Reader) -> Self
+    pub fn from_reader<'a, Reader>(reader: &Reader) -> Self
     where
         Reader: reader::TryRead<'a>,
-        Reader::Item: writer::WriteRow<Reader = Reader, Writer = W>,
+        Reader::Item: writer::Row<Reader = Reader, Writer = W>,
     {
-        let mut writer = Self::with_writer(<Reader::Item as writer::WriteRow>::writer(reader));
+        let mut writer = Self::with_writer(<Reader::Item as writer::Row>::writer(reader));
         writer.reserve(reader.len());
         writer
     }
@@ -369,7 +369,7 @@ impl<W: writer::RowWriter> BlockWriter<W> {
         self.writer.reserve(rows);
     }
 
-    pub fn write<R: writer::WriteRow<Writer = W>>(&mut self, row: R) -> Result<()> {
+    pub fn write<R: writer::Row<Writer = W>>(&mut self, row: R) -> Result<()> {
         if self.failed {
             return Err(Error::WriteFailed);
         }

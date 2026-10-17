@@ -23,10 +23,10 @@ pub use scalar::*;
 pub use string::*;
 
 pub trait ColumnWriter {
-    fn write_type_name(&self, out: &mut String);
+    fn type_name(&self, out: &mut String);
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()>;
     fn write_data(&self, out: &mut dyn Write) -> io::Result<()>;
-    fn write_default(&mut self);
+    fn push_default(&mut self);
     fn flush(&mut self) -> Result<()> {
         Ok(())
     }
@@ -34,46 +34,46 @@ pub trait ColumnWriter {
     fn clear(&mut self);
 }
 
-pub trait WriteValue: ColumnWriter {
+pub trait ValueWriter: ColumnWriter {
     type Value<'a>: 'a;
     fn write(&mut self, value: Self::Value<'_>) -> Result<()>;
 }
 
-pub trait WriteColumn<'a, R: TryRead<'a>>: ColumnWriter {
-    fn for_reader(reader: &R) -> Self;
+/// A column writer built from a reader of the same column type.
+pub trait FromReader<'a, R: TryRead<'a>>: ColumnWriter {
+    fn from_reader(reader: &R) -> Self;
     fn write_item(&mut self, item: R::Item) -> Result<()>;
 }
 
-/// Defines a default writer for a reader type.
-/// If default isn't OK, another [`WriteColumn`] can be chosen per column with
-/// `#[col(writer = XXX)]`.
-pub trait Writable<'a>: TryRead<'a> {
-    type Writer: WriteColumn<'a, Self>;
+/// The default writer for a reader type.
+/// Pick another [`FromReader`] per column with `#[col(writer = ...)]`.
+pub trait DefaultWriter<'a>: TryRead<'a> {
+    type Writer: FromReader<'a, Self>;
 }
 
-pub trait ConstSizeType {
+pub trait FixedWidth {
     type Value<'a>: 'a;
 
-    fn write_type_name(&self, out: &mut String);
+    fn type_name(&self, out: &mut String);
 
-    fn value_size(&self) -> usize;
+    fn width(&self) -> usize;
 
     /// Appends the encoding of the default value, 0 bytes by default.
-    fn write_default(&self, data: &mut Vec<u8>) {
-        data.resize(data.len() + self.value_size(), 0);
+    fn push_default(&self, data: &mut Vec<u8>) {
+        data.resize(data.len() + self.width(), 0);
     }
 
-    /// Appends exactly [`Self::value_size`] bytes, or fails without touching `data`.
+    /// Appends exactly [`Self::width`] bytes, or fails without touching `data`.
     fn write(&self, value: Self::Value<'_>, data: &mut Vec<u8>) -> Result<()>;
 }
 
 #[derive(Default)]
-pub struct ConstSizeWriter<T: ConstSizeType> {
+pub struct FixedWidthColumn<T: FixedWidth> {
     ty: T,
     data: Vec<u8>,
 }
 
-impl<T: ConstSizeType> ConstSizeWriter<T> {
+impl<T: FixedWidth> FixedWidthColumn<T> {
     pub const fn new(ty: T) -> Self {
         Self {
             ty,
@@ -82,7 +82,7 @@ impl<T: ConstSizeType> ConstSizeWriter<T> {
     }
 
     pub fn with_capacity(ty: T, rows: usize) -> Self {
-        let data = Vec::with_capacity(rows * ty.value_size());
+        let data = Vec::with_capacity(rows * ty.width());
         Self { ty, data }
     }
 
@@ -91,15 +91,15 @@ impl<T: ConstSizeType> ConstSizeWriter<T> {
     }
 }
 
-impl<T: ConstSizeType> From<T> for ConstSizeWriter<T> {
+impl<T: FixedWidth> From<T> for FixedWidthColumn<T> {
     fn from(ty: T) -> Self {
         Self::new(ty)
     }
 }
 
-impl<T: ConstSizeType> ColumnWriter for ConstSizeWriter<T> {
-    fn write_type_name(&self, out: &mut String) {
-        self.ty.write_type_name(out);
+impl<T: FixedWidth> ColumnWriter for FixedWidthColumn<T> {
+    fn type_name(&self, out: &mut String) {
+        self.ty.type_name(out);
     }
 
     fn write_prefix(&self, _out: &mut dyn Write) -> io::Result<()> {
@@ -110,12 +110,12 @@ impl<T: ConstSizeType> ColumnWriter for ConstSizeWriter<T> {
         out.write_all(&self.data)
     }
 
-    fn write_default(&mut self) {
-        self.ty.write_default(&mut self.data);
+    fn push_default(&mut self) {
+        self.ty.push_default(&mut self.data);
     }
 
     fn reserve(&mut self, rows: usize) {
-        self.data.reserve(rows * self.ty.value_size());
+        self.data.reserve(rows * self.ty.width());
     }
 
     fn clear(&mut self) {
@@ -123,7 +123,7 @@ impl<T: ConstSizeType> ColumnWriter for ConstSizeWriter<T> {
     }
 }
 
-impl<T: ConstSizeType> WriteValue for ConstSizeWriter<T> {
+impl<T: FixedWidth> ValueWriter for FixedWidthColumn<T> {
     type Value<'a> = T::Value<'a>;
 
     fn write(&mut self, value: T::Value<'_>) -> Result<()> {
@@ -131,13 +131,13 @@ impl<T: ConstSizeType> WriteValue for ConstSizeWriter<T> {
     }
 }
 
-/// Writers of the elements of a Tuple or a Variant.
-pub trait ElementWriters {
+/// A tuple of column writers: the elements of a `Tuple` or `Variant` column.
+pub trait ColumnTuple {
     /// Appends one type name per element
-    fn write_type_names(&self, out: &mut Vec<String>);
+    fn type_names(&self, out: &mut Vec<String>);
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()>;
     fn write_data(&self, out: &mut dyn Write) -> io::Result<()>;
-    fn write_default(&mut self);
+    fn push_default(&mut self);
     fn reserve(&mut self, rows: usize);
     fn clear(&mut self);
     fn flush(&mut self) -> Result<()>;
@@ -154,8 +154,8 @@ pub trait RowWriter {
 }
 
 /// A row of a block: the `*Item` struct generated by `#[derive(FromBlock)]`, or the `*Row`
-/// struct of [`WriteValue`] values generated by `#[derive(WriteBlock)]`.
-pub trait WriteRow: Sized {
+/// struct of [`ValueWriter`] values generated by `#[derive(WriteBlock)]`.
+pub trait Row: Sized {
     type Reader;
     type Writer: RowWriter;
 
@@ -190,7 +190,7 @@ impl<A: RowWriter, B: RowWriter> RowWriter for (A, B) {
     }
 }
 
-impl<A: WriteRow, B: WriteRow> WriteRow for (A, B) {
+impl<A: Row, B: Row> Row for (A, B) {
     type Reader = (A::Reader, B::Reader);
     type Writer = (A::Writer, B::Writer);
 
@@ -204,22 +204,23 @@ impl<A: WriteRow, B: WriteRow> WriteRow for (A, B) {
     }
 }
 
-pub trait VariantName {
+/// Lifetime-erased marker for a `Variant` enum: its fixed type name, if any, and the enum itself.
+pub trait VariantValue {
     const TYPE_NAME: Option<&'static str> = None;
 
     type Value<'a>: 'a;
 }
 
-// CH sorts elements in the Variant by their type name, so we need a sorted repr when serialize
-// as well. There's a corner case with the Geometry type when the order is fixed.
-pub trait WriteVariant<'a>: FromVariant<'a> {
-    type Writers: ElementWriters;
+/// An enum written into a `Variant` column. ClickHouse orders the elements by type name, so the
+/// enum's variants must be declared in that order; Geometry types are the fixed-order exception.
+pub trait IntoVariant<'a>: FromVariant<'a> {
+    type Columns: ColumnTuple;
 
-    type Name: VariantName;
+    type Marker: VariantValue;
 
-    fn writers(readers: &Self::Readers) -> Self::Writers;
+    fn columns(readers: &Self::Readers) -> Self::Columns;
 
-    fn write(self, writers: &mut Self::Writers) -> Result<u8>;
+    fn write(self, columns: &mut Self::Columns) -> Result<u8>;
 }
 
 pub fn encode_column(
@@ -229,7 +230,7 @@ pub fn encode_column(
     out: &mut dyn Write,
 ) -> io::Result<()> {
     let mut type_name = String::new();
-    writer.write_type_name(&mut type_name);
+    writer.type_name(&mut type_name);
     let mut header = Vec::with_capacity(name.len() + type_name.len() + 4);
     write_string(name.as_bytes(), &mut header);
     write_string(type_name.as_bytes(), &mut header);

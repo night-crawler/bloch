@@ -11,7 +11,7 @@ use bloch::reader::{
     Array, Bool, DateTime, F64, Ipv6, Lc, LcNullable, LcNullableTrustedStr, LcTrustedStr, Nullable,
     TryRead, U32, U64, U128, Uuid,
 };
-use bloch::writer::WriteRow;
+use bloch::writer::Row;
 use bloch::{BlockWriter, FromBlock, WriteBlock, parse::block::parse_many};
 use clickhouse::rowbinary::{de::deserialize_row_without_validation, ser::serialize_row_binary};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -121,9 +121,9 @@ fn write_rowbinary(rows: &[BenchmarkSample<'_>], out: &mut Vec<u8>) -> TestResul
 fn write_native<'a, R>(blocks: &[R], out: &mut Vec<u8>) -> TestResult<usize>
 where
     R: TryRead<'a>,
-    R::Item: WriteRow<Reader = R>,
+    R::Item: Row<Reader = R>,
 {
-    let mut writer = BlockWriter::for_reader(&blocks[0]);
+    let mut writer = BlockWriter::from_reader(&blocks[0]);
     let mut bytes = 0;
     let mut rows = 0;
     for reader in blocks.iter().cycle() {

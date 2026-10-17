@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use super::{Array, ColumnWriter, ConstSizeWriter, F64, Writable, WriteColumn, WriteValue};
+use super::{Array, ColumnWriter, DefaultWriter, F64, FixedWidthColumn, FromReader, ValueWriter};
 use crate::reader::TryRead;
 use crate::{Result, reader};
 
@@ -11,7 +11,7 @@ macro_rules! geo {
         pub struct $name(pub $writer);
 
         impl ColumnWriter for $name {
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 out.push_str($spelling);
             }
 
@@ -23,8 +23,8 @@ macro_rules! geo {
                 ColumnWriter::write_data(&self.0, out)
             }
 
-            fn write_default(&mut self) {
-                ColumnWriter::write_default(&mut self.0);
+            fn push_default(&mut self) {
+                ColumnWriter::push_default(&mut self.0);
             }
 
             fn reserve(&mut self, rows: usize) {
@@ -40,32 +40,32 @@ macro_rules! geo {
             }
         }
 
-        impl WriteValue for $name {
-            type Value<'a> = <$writer as WriteValue>::Value<'a>;
+        impl ValueWriter for $name {
+            type Value<'a> = <$writer as ValueWriter>::Value<'a>;
 
             fn write(&mut self, value: Self::Value<'_>) -> Result<()> {
                 self.0.write(value)
             }
         }
 
-        impl<'a> Writable<'a> for reader::$name<'a> {
+        impl<'a> DefaultWriter<'a> for reader::$name<'a> {
             type Writer = $name;
         }
 
-        impl<'a> WriteColumn<'a, reader::$name<'a>> for $name {
-            fn for_reader(reader: &reader::$name<'a>) -> Self {
-                Self(<$writer as WriteColumn<'a, $reader>>::for_reader(&reader.0))
+        impl<'a> FromReader<'a, reader::$name<'a>> for $name {
+            fn from_reader(reader: &reader::$name<'a>) -> Self {
+                Self(<$writer as FromReader<'a, $reader>>::from_reader(&reader.0))
             }
 
             fn write_item(&mut self, item: <$reader as TryRead<'a>>::Item) -> Result<()> {
-                <$writer as WriteColumn<'a, $reader>>::write_item(&mut self.0, item)
+                <$writer as FromReader<'a, $reader>>::write_item(&mut self.0, item)
             }
         }
     )+};
 }
 
 geo! {
-    Point((ConstSizeWriter<F64>, ConstSizeWriter<F64>)) for reader::Tuple<(reader::F64<'a>, reader::F64<'a>)> => "Point";
+    Point((FixedWidthColumn<F64>, FixedWidthColumn<F64>)) for reader::Tuple<(reader::F64<'a>, reader::F64<'a>)> => "Point";
     Ring(Array<Point>) for reader::Array<'a, reader::Point<'a>> => "Ring";
     Polygon(Array<Ring>) for reader::Array<'a, reader::Ring<'a>> => "Polygon";
     MultiPolygon(Array<Polygon>) for reader::Array<'a, reader::Polygon<'a>> => "MultiPolygon";

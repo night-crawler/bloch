@@ -2,7 +2,7 @@
 use renamed_bloch::reader::{Array, ArrayIter, I64, LcStr, Str, TryRead as _, U8, VariantNullable};
 use renamed_bloch::{BlocksIterator, FromBlock as _, FromVariant, ParsedBlock};
 
-#[derive(renamed_bloch::FromVariant, renamed_bloch::WriteVariant)]
+#[derive(renamed_bloch::FromVariant, renamed_bloch::IntoVariant)]
 enum Payload<'a> {
     #[col(reader = Array<'a, I64<'a>>)]
     Array(ArrayIter<'a, I64<'a>>),
@@ -91,7 +91,7 @@ fn variant_writer_outlives_payloads_and_source_reader() -> renamed_bloch::Result
 
         // The next iteration uses reader-derived configuration after its source block
         // and bytes have gone out of scope, and still borrows only each fresh payload.
-        writer = renamed_bloch::BlockWriter::for_reader(&VariantWriteRow::from_block(&block)?);
+        writer = renamed_bloch::BlockWriter::from_reader(&VariantWriteRow::from_block(&block)?);
     }
     Ok(())
 }
@@ -212,7 +212,7 @@ fn runtime_typed_columns_come_from_explicit_writers_or_the_reader() -> renamed_b
     let reader = FixedWriteRow::from_block(&block)?;
     assert_eq!(reader.try_read(0)?.code, "ab");
 
-    let mut writer = renamed_bloch::BlockWriter::for_reader(&reader);
+    let mut writer = renamed_bloch::BlockWriter::from_reader(&reader);
     drop(block);
     drop(data);
     let code = "xyz".to_owned();

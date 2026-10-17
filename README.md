@@ -260,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read("testdata/activity_hw.native")?;
     let (_, block) = parse_single(&data)?;
 
-    // `BlockWriter::for_reader(&Row::from_block(&block)?)` when a column type carries runtime
+    // `BlockWriter::from_reader(&Row::from_block(&block)?)` when a column type carries runtime
     // parameters, e.g. a FixedString length.
     let mut writer = BlockWriter::<RowWriter>::with_capacity(block.num_rows);
     for row in Row::rows(&block)? {

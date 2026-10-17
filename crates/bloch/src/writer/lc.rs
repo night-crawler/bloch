@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use rustc_hash::FxBuildHasher;
 
 use super::{
-    Bytes, ColumnWriter, ConstSizeType, ConstSizeWriter, Str, Writable, WriteColumn, WriteValue,
+    Bytes, ColumnWriter, DefaultWriter, FixedWidth, FixedWidthColumn, FromReader, Str, ValueWriter,
     write_le,
 };
 use crate::{
@@ -28,12 +28,12 @@ pub trait LcKey: Copy {
     fn into_owned(self) -> Self::Owned;
 }
 
-pub trait LcColumn: WriteValue {
+pub trait LcColumn: ValueWriter {
     type Key: Hash + Eq + Clone;
     fn default_key() -> Self::Key;
 }
 
-impl<T: ConstSizeType> LcColumn for ConstSizeWriter<T>
+impl<T: FixedWidth> LcColumn for FixedWidthColumn<T>
 where
     T::Value<'static>: LcKey,
 {
@@ -185,7 +185,7 @@ impl<Inner: LcColumn, S: BuildHasher + Default> Dictionary<Inner, S> {
 
     /// Slot zero holds the default (or NULL) in every dictionary.
     fn seed(&mut self) {
-        self.inner.write_default();
+        self.inner.push_default();
         if !self.nullable {
             self.slots.insert(self.default.clone(), 0);
         }
@@ -242,7 +242,7 @@ impl<Inner: LcColumn, S: BuildHasher + Default> Dictionary<Inner, S> {
         }
     }
 
-    fn write_default(&mut self) {
+    fn push_default(&mut self) {
         self.indices.push(0);
     }
 
@@ -285,9 +285,9 @@ macro_rules! lc_writer {
         }
 
         impl<Inner: LcColumn, S: BuildHasher + Default> ColumnWriter for $name<Inner, S> {
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 out.push_str($open);
-                self.dict.inner.write_type_name(out);
+                self.dict.inner.type_name(out);
                 out.push_str($close);
             }
 
@@ -299,8 +299,8 @@ macro_rules! lc_writer {
                 self.dict.write_data(out)
             }
 
-            fn write_default(&mut self) {
-                self.dict.write_default();
+            fn push_default(&mut self) {
+                self.dict.push_default();
             }
 
             fn flush(&mut self) -> Result<()> {
@@ -326,25 +326,25 @@ lc_writer!(
     "))"
 );
 
-impl<'a, Inner> Writable<'a> for reader::Lc<'a, Inner>
+impl<'a, Inner> DefaultWriter<'a> for reader::Lc<'a, Inner>
 where
-    Inner: Writable<'a> + 'a,
+    Inner: DefaultWriter<'a> + 'a,
     Inner::Item: LcKey,
     Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
 {
     type Writer = Lc<Inner::Writer>;
 }
 
-impl<'a, Inner, S> WriteColumn<'a, reader::Lc<'a, Inner>> for Lc<Inner::Writer, S>
+impl<'a, Inner, S> FromReader<'a, reader::Lc<'a, Inner>> for Lc<Inner::Writer, S>
 where
-    Inner: Writable<'a> + 'a,
+    Inner: DefaultWriter<'a> + 'a,
     Inner::Item: LcKey,
     Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
     S: BuildHasher + Default,
 {
-    fn for_reader(reader: &reader::Lc<'a, Inner>) -> Self {
+    fn from_reader(reader: &reader::Lc<'a, Inner>) -> Self {
         match &reader.dict {
-            Some(dict) => Self::with_capacity(Inner::Writer::for_reader(dict), dict.len()),
+            Some(dict) => Self::with_capacity(Inner::Writer::from_reader(dict), dict.len()),
             // An empty source column has no dictionary reader to copy parameters from.
             None => Self::default(),
         }
@@ -352,11 +352,11 @@ where
 
     fn write_item(&mut self, item: Inner::Item) -> Result<()> {
         self.dict
-            .write(item, <Inner::Writer as WriteColumn<Inner>>::write_item)
+            .write(item, <Inner::Writer as FromReader<Inner>>::write_item)
     }
 }
 
-impl<Inner, S> WriteValue for Lc<Inner, S>
+impl<Inner, S> ValueWriter for Lc<Inner, S>
 where
     Inner: LcColumn,
     for<'a> Inner::Value<'a>: LcKey<Owned = Inner::Key>,
@@ -370,25 +370,25 @@ where
     }
 }
 
-impl<'a, Inner> Writable<'a> for reader::LcNullable<'a, Inner>
+impl<'a, Inner> DefaultWriter<'a> for reader::LcNullable<'a, Inner>
 where
-    Inner: Writable<'a> + 'a,
+    Inner: DefaultWriter<'a> + 'a,
     Inner::Item: LcKey,
     Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
 {
     type Writer = LcNullable<Inner::Writer>;
 }
 
-impl<'a, Inner, S> WriteColumn<'a, reader::LcNullable<'a, Inner>> for LcNullable<Inner::Writer, S>
+impl<'a, Inner, S> FromReader<'a, reader::LcNullable<'a, Inner>> for LcNullable<Inner::Writer, S>
 where
-    Inner: Writable<'a> + 'a,
+    Inner: DefaultWriter<'a> + 'a,
     Inner::Item: LcKey,
     Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
     S: BuildHasher + Default,
 {
-    fn for_reader(reader: &reader::LcNullable<'a, Inner>) -> Self {
+    fn from_reader(reader: &reader::LcNullable<'a, Inner>) -> Self {
         match &reader.dict {
-            Some(dict) => Self::with_capacity(Inner::Writer::for_reader(dict), dict.len()),
+            Some(dict) => Self::with_capacity(Inner::Writer::from_reader(dict), dict.len()),
             None => Self::default(),
         }
     }
@@ -397,16 +397,16 @@ where
         match item {
             Some(item) => self
                 .dict
-                .write(item, <Inner::Writer as WriteColumn<Inner>>::write_item),
+                .write(item, <Inner::Writer as FromReader<Inner>>::write_item),
             None => {
-                self.dict.write_default();
+                self.dict.push_default();
                 Ok(())
             }
         }
     }
 }
 
-impl<Inner, S> WriteValue for LcNullable<Inner, S>
+impl<Inner, S> ValueWriter for LcNullable<Inner, S>
 where
     Inner: LcColumn,
     for<'a> Inner::Value<'a>: LcKey<Owned = Inner::Key>,
@@ -419,7 +419,7 @@ where
         match value {
             Some(value) => self.dict.write(value, Inner::write),
             None => {
-                self.dict.write_default();
+                self.dict.push_default();
                 Ok(())
             }
         }

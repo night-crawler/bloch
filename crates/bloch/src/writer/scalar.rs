@@ -8,7 +8,9 @@ use chrono_tz::Tz;
 use rust_decimal::Decimal;
 use rustc_hash::FxBuildHasher;
 
-use super::{ConstSizeType, ConstSizeWriter, Writable, WriteColumn, WriteValue as _, write_quoted};
+use super::{
+    DefaultWriter, FixedWidth, FixedWidthColumn, FromReader, ValueWriter as _, write_quoted,
+};
 use crate::{Error, Result, conv, interval, mark::Mark, reader};
 
 fn uuid_bytes(value: uuid::Uuid) -> [u8; 16] {
@@ -25,14 +27,14 @@ macro_rules! scalars {
         #[derive(Default, Clone, Copy)]
         pub struct $name;
 
-        impl ConstSizeType for $name {
+        impl FixedWidth for $name {
             type Value<'a> = $item;
 
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 out.push_str($type_name);
             }
 
-            fn value_size(&self) -> usize {
+            fn width(&self) -> usize {
                 $width
             }
 
@@ -43,12 +45,12 @@ macro_rules! scalars {
             }
         }
 
-        impl<'a> Writable<'a> for reader::$name<'a> {
-            type Writer = ConstSizeWriter<$name>;
+        impl<'a> DefaultWriter<'a> for reader::$name<'a> {
+            type Writer = FixedWidthColumn<$name>;
         }
 
-        impl<'a> WriteColumn<'a, reader::$name<'a>> for ConstSizeWriter<$name> {
-            fn for_reader(_reader: &reader::$name<'a>) -> Self {
+        impl<'a> FromReader<'a, reader::$name<'a>> for FixedWidthColumn<$name> {
+            fn from_reader(_reader: &reader::$name<'a>) -> Self {
                 Self::default()
             }
 
@@ -87,33 +89,33 @@ scalars! {
 #[derive(Default, Clone, Copy)]
 pub struct Nothing;
 
-impl ConstSizeType for Nothing {
+impl FixedWidth for Nothing {
     type Value<'a> = ();
 
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         out.push_str("Nothing");
     }
 
-    fn value_size(&self) -> usize {
+    fn width(&self) -> usize {
         1
     }
 
-    fn write_default(&self, data: &mut Vec<u8>) {
+    fn push_default(&self, data: &mut Vec<u8>) {
         data.push(b'0');
     }
 
     fn write(&self, (): (), data: &mut Vec<u8>) -> Result<()> {
-        self.write_default(data);
+        self.push_default(data);
         Ok(())
     }
 }
 
-impl Writable<'_> for reader::Nothing {
-    type Writer = ConstSizeWriter<Nothing>;
+impl DefaultWriter<'_> for reader::Nothing {
+    type Writer = FixedWidthColumn<Nothing>;
 }
 
-impl WriteColumn<'_, reader::Nothing> for ConstSizeWriter<Nothing> {
-    fn for_reader(_reader: &reader::Nothing) -> Self {
+impl FromReader<'_, reader::Nothing> for FixedWidthColumn<Nothing> {
+    fn from_reader(_reader: &reader::Nothing) -> Self {
         Self::default()
     }
 
@@ -128,10 +130,10 @@ pub struct Usize {
     pub width: usize,
 }
 
-impl ConstSizeType for Usize {
+impl FixedWidth for Usize {
     type Value<'a> = usize;
 
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         out.push_str(match self.width {
             1 => "UInt8",
             2 => "UInt16",
@@ -140,7 +142,7 @@ impl ConstSizeType for Usize {
         });
     }
 
-    fn value_size(&self) -> usize {
+    fn width(&self) -> usize {
         self.width
     }
 
@@ -159,12 +161,12 @@ impl ConstSizeType for Usize {
     }
 }
 
-impl<'a> Writable<'a> for reader::Usize<'a> {
-    type Writer = ConstSizeWriter<Usize>;
+impl<'a> DefaultWriter<'a> for reader::Usize<'a> {
+    type Writer = FixedWidthColumn<Usize>;
 }
 
-impl<'a> WriteColumn<'a, reader::Usize<'a>> for ConstSizeWriter<Usize> {
-    fn for_reader(reader: &reader::Usize<'a>) -> Self {
+impl<'a> FromReader<'a, reader::Usize<'a>> for FixedWidthColumn<Usize> {
+    fn from_reader(reader: &reader::Usize<'a>) -> Self {
         let width = match reader.0 {
             Mark::UInt8(_) => 1,
             Mark::UInt16(_) => 2,
@@ -204,10 +206,10 @@ macro_rules! enums {
             }
         }
 
-        impl ConstSizeType for $name {
+        impl FixedWidth for $name {
             type Value<'a> = &'a str;
 
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 out.push_str(concat!($type_name, "("));
                 for (index, (name, id)) in self.variants.iter().enumerate() {
                     if index != 0 {
@@ -219,11 +221,11 @@ macro_rules! enums {
                 out.push(')');
             }
 
-            fn value_size(&self) -> usize {
+            fn width(&self) -> usize {
                 size_of::<$int>()
             }
 
-            fn write_default(&self, data: &mut Vec<u8>) {
+            fn push_default(&self, data: &mut Vec<u8>) {
                 // ClickHouse's default is the first declared variant.
                 let id = self.variants.first().map_or(0, |(_, id)| *id);
                 data.extend_from_slice(&id.to_le_bytes());
@@ -242,12 +244,12 @@ macro_rules! enums {
             }
         }
 
-        impl<'a> Writable<'a> for reader::$name<'a> {
-            type Writer = ConstSizeWriter<$name>;
+        impl<'a> DefaultWriter<'a> for reader::$name<'a> {
+            type Writer = FixedWidthColumn<$name>;
         }
 
-        impl<'a> WriteColumn<'a, reader::$name<'a>> for ConstSizeWriter<$name> {
-            fn for_reader(reader: &reader::$name<'a>) -> Self {
+        impl<'a> FromReader<'a, reader::$name<'a>> for FixedWidthColumn<$name> {
+            fn from_reader(reader: &reader::$name<'a>) -> Self {
                 Self::new($name::new(&reader.0.variants))
             }
 
@@ -274,10 +276,10 @@ pub struct DateTime {
     pub tz: Option<Tz>,
 }
 
-impl ConstSizeType for DateTime {
+impl FixedWidth for DateTime {
     type Value<'a> = chrono::DateTime<Utc>;
 
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         out.push_str("DateTime");
         if self.tz.is_some() {
             out.push('(');
@@ -286,7 +288,7 @@ impl ConstSizeType for DateTime {
         }
     }
 
-    fn value_size(&self) -> usize {
+    fn width(&self) -> usize {
         4
     }
 
@@ -303,12 +305,12 @@ impl ConstSizeType for DateTime {
     }
 }
 
-impl<'a> Writable<'a> for reader::DateTime<'a> {
-    type Writer = ConstSizeWriter<DateTime>;
+impl<'a> DefaultWriter<'a> for reader::DateTime<'a> {
+    type Writer = FixedWidthColumn<DateTime>;
 }
 
-impl<'a> WriteColumn<'a, reader::DateTime<'a>> for ConstSizeWriter<DateTime> {
-    fn for_reader(reader: &reader::DateTime<'a>) -> Self {
+impl<'a> FromReader<'a, reader::DateTime<'a>> for FixedWidthColumn<DateTime> {
+    fn from_reader(reader: &reader::DateTime<'a>) -> Self {
         let tz = reader.mark.explicit_tz.then_some(reader.mark.tz);
         Self::new(DateTime { tz })
     }
@@ -324,10 +326,10 @@ pub struct DateTime64 {
     pub tz: Option<Tz>,
 }
 
-impl ConstSizeType for DateTime64 {
+impl FixedWidth for DateTime64 {
     type Value<'a> = chrono::DateTime<Utc>;
 
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         let _ = write!(out, "DateTime64({}", self.precision);
         if self.tz.is_some() {
             out.push_str(", ");
@@ -336,7 +338,7 @@ impl ConstSizeType for DateTime64 {
         out.push(')');
     }
 
-    fn value_size(&self) -> usize {
+    fn width(&self) -> usize {
         8
     }
 
@@ -349,12 +351,12 @@ impl ConstSizeType for DateTime64 {
     }
 }
 
-impl<'a> Writable<'a> for reader::DateTime64<'a> {
-    type Writer = ConstSizeWriter<DateTime64>;
+impl<'a> DefaultWriter<'a> for reader::DateTime64<'a> {
+    type Writer = FixedWidthColumn<DateTime64>;
 }
 
-impl<'a> WriteColumn<'a, reader::DateTime64<'a>> for ConstSizeWriter<DateTime64> {
-    fn for_reader(reader: &reader::DateTime64<'a>) -> Self {
+impl<'a> FromReader<'a, reader::DateTime64<'a>> for FixedWidthColumn<DateTime64> {
+    fn from_reader(reader: &reader::DateTime64<'a>) -> Self {
         let precision = reader.mark.precision;
         let tz = reader.mark.explicit_tz.then_some(reader.mark.tz);
         Self::new(DateTime64 { precision, tz })
@@ -370,14 +372,14 @@ pub struct Time64 {
     pub precision: u8,
 }
 
-impl ConstSizeType for Time64 {
+impl FixedWidth for Time64 {
     type Value<'a> = TimeDelta;
 
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         let _ = write!(out, "Time64({})", self.precision);
     }
 
-    fn value_size(&self) -> usize {
+    fn width(&self) -> usize {
         8
     }
 
@@ -388,12 +390,12 @@ impl ConstSizeType for Time64 {
     }
 }
 
-impl<'a> Writable<'a> for reader::Time64<'a> {
-    type Writer = ConstSizeWriter<Time64>;
+impl<'a> DefaultWriter<'a> for reader::Time64<'a> {
+    type Writer = FixedWidthColumn<Time64>;
 }
 
-impl<'a> WriteColumn<'a, reader::Time64<'a>> for ConstSizeWriter<Time64> {
-    fn for_reader(reader: &reader::Time64<'a>) -> Self {
+impl<'a> FromReader<'a, reader::Time64<'a>> for FixedWidthColumn<Time64> {
+    fn from_reader(reader: &reader::Time64<'a>) -> Self {
         let precision = reader.0.precision;
         Self::new(Time64 { precision })
     }
@@ -408,15 +410,15 @@ pub struct Interval {
     pub kind: interval::Kind,
 }
 
-impl ConstSizeType for Interval {
+impl FixedWidth for Interval {
     type Value<'a> = TimeDelta;
 
-    fn write_type_name(&self, out: &mut String) {
+    fn type_name(&self, out: &mut String) {
         out.push_str("Interval");
         out.push_str(self.kind.as_str());
     }
 
-    fn value_size(&self) -> usize {
+    fn width(&self) -> usize {
         8
     }
 
@@ -442,12 +444,12 @@ impl ConstSizeType for Interval {
     }
 }
 
-impl<'a> Writable<'a> for reader::Interval<'a> {
-    type Writer = ConstSizeWriter<Interval>;
+impl<'a> DefaultWriter<'a> for reader::Interval<'a> {
+    type Writer = FixedWidthColumn<Interval>;
 }
 
-impl<'a> WriteColumn<'a, reader::Interval<'a>> for ConstSizeWriter<Interval> {
-    fn for_reader(reader: &reader::Interval<'a>) -> Self {
+impl<'a> FromReader<'a, reader::Interval<'a>> for FixedWidthColumn<Interval> {
+    fn from_reader(reader: &reader::Interval<'a>) -> Self {
         let kind = reader.0.kind;
         Self::new(Interval { kind })
     }
@@ -465,14 +467,14 @@ macro_rules! decimals {
             pub scale: u8,
         }
 
-        impl ConstSizeType for $name {
+        impl FixedWidth for $name {
             type Value<'a> = Decimal;
 
-            fn write_type_name(&self, out: &mut String) {
+            fn type_name(&self, out: &mut String) {
                 let _ = write!(out, "Decimal({}, {})", $precision, self.scale);
             }
 
-            fn value_size(&self) -> usize {
+            fn width(&self) -> usize {
                 size_of::<$int>()
             }
 
@@ -492,12 +494,12 @@ macro_rules! decimals {
             }
         }
 
-        impl<'a> Writable<'a> for reader::$name<'a> {
-            type Writer = ConstSizeWriter<$name>;
+        impl<'a> DefaultWriter<'a> for reader::$name<'a> {
+            type Writer = FixedWidthColumn<$name>;
         }
 
-        impl<'a> WriteColumn<'a, reader::$name<'a>> for ConstSizeWriter<$name> {
-            fn for_reader(reader: &reader::$name<'a>) -> Self {
+        impl<'a> FromReader<'a, reader::$name<'a>> for FixedWidthColumn<$name> {
+            fn from_reader(reader: &reader::$name<'a>) -> Self {
                 let scale = reader.0.scale;
                 Self::new($name { scale })
             }
