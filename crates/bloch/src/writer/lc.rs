@@ -20,37 +20,37 @@ use crate::{
 };
 
 pub trait LcKey: Copy {
-    type Key: Hash + Eq + Clone + Borrow<Self::Lookup>;
-    type Lookup: Hash + Eq + ?Sized;
-    fn default_key() -> Self::Key;
-    fn lookup(self) -> impl Borrow<Self::Lookup>;
-    fn key(self) -> Self::Key;
+    type Owned: Hash + Eq + Clone + Borrow<Self::Borrowed>;
+    type Borrowed: Hash + Eq + ?Sized;
+    /// Key of ClickHouse's default for the type: slot zero of a non-nullable dictionary.
+    fn default_key() -> Self::Owned;
+    fn as_borrowed(self) -> impl Borrow<Self::Borrowed>;
+    fn into_owned(self) -> Self::Owned;
 }
 
-/// Implemented for the column writers ClickHouse allows under `LowCardinality`.
-pub trait LcKeys: WriteValue {
+pub trait LcColumn: WriteValue {
     type Key: Hash + Eq + Clone;
     fn default_key() -> Self::Key;
 }
 
-impl<T: ConstSizeType> LcKeys for ConstSizeWriter<T>
+impl<T: ConstSizeType> LcColumn for ConstSizeWriter<T>
 where
     T::Value<'static>: LcKey,
 {
-    type Key = <T::Value<'static> as LcKey>::Key;
+    type Key = <T::Value<'static> as LcKey>::Owned;
     fn default_key() -> Self::Key {
         <T::Value<'static> as LcKey>::default_key()
     }
 }
 
-impl LcKeys for Str {
+impl LcColumn for Str {
     type Key = Box<str>;
     fn default_key() -> Box<str> {
         <&str>::default_key()
     }
 }
 
-impl LcKeys for Bytes {
+impl LcColumn for Bytes {
     type Key = Box<[u8]>;
     fn default_key() -> Box<[u8]> {
         <&[u8]>::default_key()
@@ -60,30 +60,30 @@ impl LcKeys for Bytes {
 macro_rules! lc_key {
     ($($t:ty = $default:expr),+ $(,)?) => {$(
         impl LcKey for $t {
-            type Key = Self;
-            type Lookup = Self;
+            type Owned = Self;
+            type Borrowed = Self;
             fn default_key() -> Self {
                 $default
             }
-            fn lookup(self) -> impl Borrow<Self> {
+            fn as_borrowed(self) -> impl Borrow<Self> {
                 self
             }
-            fn key(self) -> Self {
+            fn into_owned(self) -> Self {
                 self
             }
         }
     )+};
     ($($t:ty => $key:ty = $default:expr, |$v:ident| $expr:expr;)+) => {$(
         impl LcKey for $t {
-            type Key = $key;
-            type Lookup = $key;
+            type Owned = $key;
+            type Borrowed = $key;
             fn default_key() -> $key {
                 $default
             }
-            fn lookup(self) -> impl Borrow<$key> {
-                self.key()
+            fn as_borrowed(self) -> impl Borrow<$key> {
+                self.into_owned()
             }
-            fn key(self) -> $key {
+            fn into_owned(self) -> $key {
                 let $v = self;
                 $expr
             }
@@ -120,63 +120,63 @@ lc_key!(
 );
 
 impl LcKey for &str {
-    type Key = Box<str>;
-    type Lookup = str;
+    type Owned = Box<str>;
+    type Borrowed = str;
     fn default_key() -> Box<str> {
         "".into()
     }
-    fn lookup(self) -> impl Borrow<str> {
+    fn as_borrowed(self) -> impl Borrow<str> {
         self
     }
-    fn key(self) -> Box<str> {
+    fn into_owned(self) -> Box<str> {
         self.into()
     }
 }
 
 impl LcKey for &bstr::BStr {
-    type Key = Box<[u8]>;
-    type Lookup = [u8];
+    type Owned = Box<[u8]>;
+    type Borrowed = [u8];
     fn default_key() -> Box<[u8]> {
         [].into()
     }
-    fn lookup(self) -> impl Borrow<[u8]> {
+    fn as_borrowed(self) -> impl Borrow<[u8]> {
         <&[u8]>::from(self)
     }
-    fn key(self) -> Box<[u8]> {
+    fn into_owned(self) -> Box<[u8]> {
         <&[u8]>::from(self).into()
     }
 }
 
 impl LcKey for &[u8] {
-    type Key = Box<[u8]>;
-    type Lookup = [u8];
+    type Owned = Box<[u8]>;
+    type Borrowed = [u8];
     fn default_key() -> Box<[u8]> {
         [].into()
     }
-    fn lookup(self) -> impl Borrow<[u8]> {
+    fn as_borrowed(self) -> impl Borrow<[u8]> {
         self
     }
-    fn key(self) -> Box<[u8]> {
+    fn into_owned(self) -> Box<[u8]> {
         self.into()
     }
 }
 
-struct Dictionary<Keys: LcKeys, S> {
-    slots: HashMap<Keys::Key, u32, S>,
+struct Dictionary<Inner: LcColumn, S> {
+    slots: HashMap<Inner::Key, u32, S>,
     /// Slot zero of a non-nullable dictionary; kept for `clear`.
-    default: Keys::Key,
+    default: Inner::Key,
     nullable: bool,
-    keys: Keys,
+    inner: Inner,
     indices: Vec<u32>,
 }
 
-impl<Keys: LcKeys, S: BuildHasher + Default> Dictionary<Keys, S> {
-    fn new(keys: Keys, nullable: bool, capacity: usize) -> Self {
+impl<Inner: LcColumn, S: BuildHasher + Default> Dictionary<Inner, S> {
+    fn new(inner: Inner, nullable: bool, capacity: usize) -> Self {
         let mut this = Self {
             slots: HashMap::with_capacity_and_hasher(capacity, S::default()),
-            default: Keys::default_key(),
+            default: Inner::default_key(),
             nullable,
-            keys,
+            inner,
             indices: Vec::new(),
         };
         this.seed();
@@ -185,29 +185,26 @@ impl<Keys: LcKeys, S: BuildHasher + Default> Dictionary<Keys, S> {
 
     /// Slot zero holds the default (or NULL) in every dictionary.
     fn seed(&mut self) {
-        self.keys.write_default();
+        self.inner.write_default();
         if !self.nullable {
             self.slots.insert(self.default.clone(), 0);
         }
     }
 
-    fn write<V>(
-        &mut self,
-        value: V,
-        write_key: impl FnOnce(&mut Keys, V) -> Result<()>,
-    ) -> Result<()>
+    /// `write` appends `value` to the inner column; it runs only on a dictionary miss.
+    fn write<V>(&mut self, value: V, write: impl FnOnce(&mut Inner, V) -> Result<()>) -> Result<()>
     where
-        V: LcKey<Key = Keys::Key>,
-        Keys::Key: Borrow<V::Lookup>,
+        V: LcKey<Owned = Inner::Key>,
+        Inner::Key: Borrow<V::Borrowed>,
     {
-        if let Some(&index) = self.slots.get(value.lookup().borrow()) {
+        if let Some(&index) = self.slots.get(value.as_borrowed().borrow()) {
             self.indices.push(index);
             return Ok(());
         }
         let index = u32::try_from(self.slots.len() + usize::from(self.nullable))?;
-        self.slots.insert(value.key(), index);
+        self.slots.insert(value.into_owned(), index);
         self.indices.push(index);
-        write_key(&mut self.keys, value)
+        write(&mut self.inner, value)
     }
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
@@ -229,7 +226,7 @@ impl<Keys: LcKeys, S: BuildHasher + Default> Dictionary<Keys, S> {
         let flags = HAS_ADDITIONAL_KEYS_BIT | NEED_UPDATE_DICTIONARY_BIT | index_type;
         out.write_all(&flags.to_le_bytes())?;
         out.write_all(&(dictionary_size as u64).to_le_bytes())?;
-        self.keys.write_data(out)?;
+        self.inner.write_data(out)?;
         out.write_all(&(self.indices.len() as u64).to_le_bytes())?;
         match index_type {
             TUINT8 => write_le(&self.indices, |index| [index.to_le_bytes()[0]], out),
@@ -255,7 +252,7 @@ impl<Keys: LcKeys, S: BuildHasher + Default> Dictionary<Keys, S> {
 
     fn clear(&mut self) {
         self.slots.clear();
-        self.keys.clear();
+        self.inner.clear();
         self.indices.clear();
         self.seed();
     }
@@ -265,32 +262,32 @@ impl<Keys: LcKeys, S: BuildHasher + Default> Dictionary<Keys, S> {
 /// type name; everything else goes through `Dictionary`.
 macro_rules! lc_writer {
     ($name:ident, nullable = $nullable:literal, $open:literal, $close:literal) => {
-        pub struct $name<Keys: LcKeys, S = FxBuildHasher> {
-            dict: Dictionary<Keys, S>,
+        pub struct $name<Inner: LcColumn, S = FxBuildHasher> {
+            dict: Dictionary<Inner, S>,
         }
 
-        impl<Keys: LcKeys, S: BuildHasher + Default> $name<Keys, S> {
-            pub fn new(keys: Keys) -> Self {
-                Self::with_capacity(keys, 0)
+        impl<Inner: LcColumn, S: BuildHasher + Default> $name<Inner, S> {
+            pub fn new(inner: Inner) -> Self {
+                Self::with_capacity(inner, 0)
             }
 
-            pub fn with_capacity(keys: Keys, capacity: usize) -> Self {
+            pub fn with_capacity(inner: Inner, capacity: usize) -> Self {
                 Self {
-                    dict: Dictionary::new(keys, $nullable, capacity),
+                    dict: Dictionary::new(inner, $nullable, capacity),
                 }
             }
         }
 
-        impl<Keys: LcKeys + Default, S: BuildHasher + Default> Default for $name<Keys, S> {
+        impl<Inner: LcColumn + Default, S: BuildHasher + Default> Default for $name<Inner, S> {
             fn default() -> Self {
-                Self::new(Keys::default())
+                Self::new(Inner::default())
             }
         }
 
-        impl<Keys: LcKeys, S: BuildHasher + Default> ColumnWriter for $name<Keys, S> {
+        impl<Inner: LcColumn, S: BuildHasher + Default> ColumnWriter for $name<Inner, S> {
             fn write_type_name(&self, out: &mut String) {
                 out.push_str($open);
-                self.dict.keys.write_type_name(out);
+                self.dict.inner.write_type_name(out);
                 out.push_str($close);
             }
 
@@ -307,7 +304,7 @@ macro_rules! lc_writer {
             }
 
             fn flush(&mut self) -> Result<()> {
-                self.dict.keys.flush()
+                self.dict.inner.flush()
             }
 
             fn reserve(&mut self, rows: usize) {
@@ -333,7 +330,7 @@ impl<'a, Inner> Writable<'a> for reader::Lc<'a, Inner>
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
+    Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
 {
     type Writer = Lc<Inner::Writer>;
 }
@@ -342,7 +339,7 @@ impl<'a, Inner, S> WriteColumn<'a, reader::Lc<'a, Inner>> for Lc<Inner::Writer, 
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
+    Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
     S: BuildHasher + Default,
 {
     fn for_reader(reader: &reader::Lc<'a, Inner>) -> Self {
@@ -359,17 +356,17 @@ where
     }
 }
 
-impl<Keys, S> WriteValue for Lc<Keys, S>
+impl<Inner, S> WriteValue for Lc<Inner, S>
 where
-    Keys: LcKeys,
-    for<'a> Keys::Value<'a>: LcKey<Key = Keys::Key>,
-    for<'a> Keys::Key: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
+    Inner: LcColumn,
+    for<'a> Inner::Value<'a>: LcKey<Owned = Inner::Key>,
+    for<'a> Inner::Key: Borrow<<Inner::Value<'a> as LcKey>::Borrowed>,
     S: BuildHasher + Default,
 {
-    type Value<'a> = Keys::Value<'a>;
+    type Value<'a> = Inner::Value<'a>;
 
-    fn write(&mut self, value: Keys::Value<'_>) -> Result<()> {
-        self.dict.write(value, Keys::write)
+    fn write(&mut self, value: Inner::Value<'_>) -> Result<()> {
+        self.dict.write(value, Inner::write)
     }
 }
 
@@ -377,7 +374,7 @@ impl<'a, Inner> Writable<'a> for reader::LcNullable<'a, Inner>
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
+    Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
 {
     type Writer = LcNullable<Inner::Writer>;
 }
@@ -386,7 +383,7 @@ impl<'a, Inner, S> WriteColumn<'a, reader::LcNullable<'a, Inner>> for LcNullable
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
+    Inner::Writer: LcColumn<Key = <Inner::Item as LcKey>::Owned> + Default,
     S: BuildHasher + Default,
 {
     fn for_reader(reader: &reader::LcNullable<'a, Inner>) -> Self {
@@ -409,18 +406,18 @@ where
     }
 }
 
-impl<Keys, S> WriteValue for LcNullable<Keys, S>
+impl<Inner, S> WriteValue for LcNullable<Inner, S>
 where
-    Keys: LcKeys,
-    for<'a> Keys::Value<'a>: LcKey<Key = Keys::Key>,
-    for<'a> Keys::Key: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
+    Inner: LcColumn,
+    for<'a> Inner::Value<'a>: LcKey<Owned = Inner::Key>,
+    for<'a> Inner::Key: Borrow<<Inner::Value<'a> as LcKey>::Borrowed>,
     S: BuildHasher + Default,
 {
-    type Value<'a> = Option<Keys::Value<'a>>;
+    type Value<'a> = Option<Inner::Value<'a>>;
 
-    fn write(&mut self, value: Option<Keys::Value<'_>>) -> Result<()> {
+    fn write(&mut self, value: Option<Inner::Value<'_>>) -> Result<()> {
         match value {
-            Some(value) => self.dict.write(value, Keys::write),
+            Some(value) => self.dict.write(value, Inner::write),
             None => {
                 self.dict.write_default();
                 Ok(())
