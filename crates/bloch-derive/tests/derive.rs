@@ -235,7 +235,7 @@ fn runtime_typed_columns_come_from_explicit_writers_or_the_reader() -> renamed_b
 
 #[derive(renamed_bloch::FromBlock, renamed_bloch::WriteBlock, Copy, Clone)]
 struct HasherRow<'a> {
-    #[col(writer = renamed_bloch::writer::Lc<Box<str>, renamed_bloch::writer::Str, std::hash::RandomState>)]
+    #[col(writer = renamed_bloch::writer::Lc<renamed_bloch::writer::Str, std::hash::RandomState>)]
     tag: LcStr<'a>,
 }
 

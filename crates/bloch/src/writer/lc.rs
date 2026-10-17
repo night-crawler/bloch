@@ -6,7 +6,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use rustc_hash::FxBuildHasher;
 
-use super::{ColumnWriter, Writable, WriteColumn, WriteValue, write_le};
+use super::{
+    Bytes, ColumnWriter, ConstSizeType, ConstSizeWriter, Str, Writable, WriteColumn, WriteValue,
+    write_le,
+};
 use crate::{
     Result,
     parse::consts::{
@@ -16,29 +19,52 @@ use crate::{
     reader,
 };
 
-pub trait LcDictionaryKeyDefault: Hash + Eq {
-    fn default_key() -> Self;
-}
-
 pub trait LcKey: Copy {
-    /// Owned key stored in the dictionary.
-    type Key: LcDictionaryKeyDefault + Borrow<Self::Lookup>;
-    /// Borrowed form the dictionary is probed with.
+    type Key: Hash + Eq + Clone + Borrow<Self::Lookup>;
     type Lookup: Hash + Eq + ?Sized;
+    fn default_key() -> Self::Key;
     fn lookup(self) -> impl Borrow<Self::Lookup>;
     fn key(self) -> Self::Key;
 }
 
+/// Implemented for the column writers ClickHouse allows under `LowCardinality`.
+pub trait LcKeys: WriteValue {
+    type Key: Hash + Eq + Clone;
+    fn default_key() -> Self::Key;
+}
+
+impl<T: ConstSizeType> LcKeys for ConstSizeWriter<T>
+where
+    T::Value<'static>: LcKey,
+{
+    type Key = <T::Value<'static> as LcKey>::Key;
+    fn default_key() -> Self::Key {
+        <T::Value<'static> as LcKey>::default_key()
+    }
+}
+
+impl LcKeys for Str {
+    type Key = Box<str>;
+    fn default_key() -> Box<str> {
+        <&str>::default_key()
+    }
+}
+
+impl LcKeys for Bytes {
+    type Key = Box<[u8]>;
+    fn default_key() -> Box<[u8]> {
+        <&[u8]>::default_key()
+    }
+}
+
 macro_rules! lc_key {
     ($($t:ty = $default:expr),+ $(,)?) => {$(
-        impl LcDictionaryKeyDefault for $t {
-            fn default_key() -> Self {
-                $default
-            }
-        }
         impl LcKey for $t {
             type Key = Self;
             type Lookup = Self;
+            fn default_key() -> Self {
+                $default
+            }
             fn lookup(self) -> impl Borrow<Self> {
                 self
             }
@@ -47,10 +73,13 @@ macro_rules! lc_key {
             }
         }
     )+};
-    ($($t:ty => $key:ty, |$v:ident| $expr:expr;)+) => {$(
+    ($($t:ty => $key:ty = $default:expr, |$v:ident| $expr:expr;)+) => {$(
         impl LcKey for $t {
             type Key = $key;
             type Lookup = $key;
+            fn default_key() -> $key {
+                $default
+            }
             fn lookup(self) -> impl Borrow<$key> {
                 self.key()
             }
@@ -83,34 +112,19 @@ lc_key!(
     rust_decimal::Decimal = rust_decimal::Decimal::ZERO,
 );
 lc_key!(
-    f32 => u32, |v| v.to_bits();
-    f64 => u64, |v| v.to_bits();
-    half::bf16 => u16, |v| v.to_bits();
-    chrono::DateTime<chrono_tz::Tz> => (i64, u32), |v| (v.timestamp(), v.timestamp_subsec_nanos());
-    chrono::DateTime<chrono::Utc> => (i64, u32), |v| (v.timestamp(), v.timestamp_subsec_nanos());
+    f32 => u32 = 0, |v| v.to_bits();
+    f64 => u64 = 0, |v| v.to_bits();
+    half::bf16 => u16 = 0, |v| v.to_bits();
+    chrono::DateTime<chrono_tz::Tz> => (i64, u32) = (0, 0), |v| (v.timestamp(), v.timestamp_subsec_nanos());
+    chrono::DateTime<chrono::Utc> => (i64, u32) = (0, 0), |v| (v.timestamp(), v.timestamp_subsec_nanos());
 );
-
-impl LcDictionaryKeyDefault for (i64, u32) {
-    fn default_key() -> Self {
-        (0, 0)
-    }
-}
-
-impl LcDictionaryKeyDefault for Box<str> {
-    fn default_key() -> Self {
-        "".into()
-    }
-}
-
-impl LcDictionaryKeyDefault for Box<[u8]> {
-    fn default_key() -> Self {
-        [].into()
-    }
-}
 
 impl LcKey for &str {
     type Key = Box<str>;
     type Lookup = str;
+    fn default_key() -> Box<str> {
+        "".into()
+    }
     fn lookup(self) -> impl Borrow<str> {
         self
     }
@@ -122,6 +136,9 @@ impl LcKey for &str {
 impl LcKey for &bstr::BStr {
     type Key = Box<[u8]>;
     type Lookup = [u8];
+    fn default_key() -> Box<[u8]> {
+        [].into()
+    }
     fn lookup(self) -> impl Borrow<[u8]> {
         <&[u8]>::from(self)
     }
@@ -133,6 +150,9 @@ impl LcKey for &bstr::BStr {
 impl LcKey for &[u8] {
     type Key = Box<[u8]>;
     type Lookup = [u8];
+    fn default_key() -> Box<[u8]> {
+        [].into()
+    }
     fn lookup(self) -> impl Borrow<[u8]> {
         self
     }
@@ -141,19 +161,20 @@ impl LcKey for &[u8] {
     }
 }
 
-struct Dictionary<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default> {
-    slots: HashMap<Key, u32, S>,
+struct Dictionary<Keys: LcKeys, S> {
+    slots: HashMap<Keys::Key, u32, S>,
+    /// Slot zero of a non-nullable dictionary; kept for `clear`.
+    default: Keys::Key,
     nullable: bool,
     keys: Keys,
     indices: Vec<u32>,
 }
 
-impl<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
-    Dictionary<Key, Keys, S>
-{
+impl<Keys: LcKeys, S: BuildHasher + Default> Dictionary<Keys, S> {
     fn new(keys: Keys, nullable: bool, capacity: usize) -> Self {
         let mut this = Self {
             slots: HashMap::with_capacity_and_hasher(capacity, S::default()),
+            default: Keys::default_key(),
             nullable,
             keys,
             indices: Vec::new(),
@@ -166,7 +187,7 @@ impl<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
     fn seed(&mut self) {
         self.keys.write_default();
         if !self.nullable {
-            self.slots.insert(Key::default_key(), 0);
+            self.slots.insert(self.default.clone(), 0);
         }
     }
 
@@ -176,8 +197,8 @@ impl<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
         write_key: impl FnOnce(&mut Keys, V) -> Result<()>,
     ) -> Result<()>
     where
-        V: LcKey<Key = Key>,
-        Key: Borrow<V::Lookup>,
+        V: LcKey<Key = Keys::Key>,
+        Keys::Key: Borrow<V::Lookup>,
     {
         if let Some(&index) = self.slots.get(value.lookup().borrow()) {
             self.indices.push(index);
@@ -240,83 +261,88 @@ impl<Key: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
     }
 }
 
-pub struct Lc<
-    K: LcDictionaryKeyDefault,
-    Keys: ColumnWriter,
-    S: BuildHasher + Default = FxBuildHasher,
-> {
-    dict: Dictionary<K, Keys, S>,
-}
-
-impl<K: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default> Lc<K, Keys, S> {
-    pub fn new(keys: Keys) -> Self {
-        Self::with_capacity(keys, 0)
-    }
-
-    pub fn with_capacity(keys: Keys, capacity: usize) -> Self {
-        Self {
-            dict: Dictionary::new(keys, false, capacity),
+/// `Lc` and `LcNullable` differ only in whether slot zero is NULL and in how they spell their
+/// type name; everything else goes through `Dictionary`.
+macro_rules! lc_writer {
+    ($name:ident, nullable = $nullable:literal, $open:literal, $close:literal) => {
+        pub struct $name<Keys: LcKeys, S = FxBuildHasher> {
+            dict: Dictionary<Keys, S>,
         }
-    }
+
+        impl<Keys: LcKeys, S: BuildHasher + Default> $name<Keys, S> {
+            pub fn new(keys: Keys) -> Self {
+                Self::with_capacity(keys, 0)
+            }
+
+            pub fn with_capacity(keys: Keys, capacity: usize) -> Self {
+                Self {
+                    dict: Dictionary::new(keys, $nullable, capacity),
+                }
+            }
+        }
+
+        impl<Keys: LcKeys + Default, S: BuildHasher + Default> Default for $name<Keys, S> {
+            fn default() -> Self {
+                Self::new(Keys::default())
+            }
+        }
+
+        impl<Keys: LcKeys, S: BuildHasher + Default> ColumnWriter for $name<Keys, S> {
+            fn write_type_name(&self, out: &mut String) {
+                out.push_str($open);
+                self.dict.keys.write_type_name(out);
+                out.push_str($close);
+            }
+
+            fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
+                self.dict.write_prefix(out)
+            }
+
+            fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
+                self.dict.write_data(out)
+            }
+
+            fn write_default(&mut self) {
+                self.dict.write_default();
+            }
+
+            fn flush(&mut self) -> Result<()> {
+                self.dict.keys.flush()
+            }
+
+            fn reserve(&mut self, rows: usize) {
+                self.dict.reserve(rows);
+            }
+
+            fn clear(&mut self) {
+                self.dict.clear();
+            }
+        }
+    };
 }
 
-impl<K: LcDictionaryKeyDefault, Keys: ColumnWriter + Default, S: BuildHasher + Default> Default
-    for Lc<K, Keys, S>
-{
-    fn default() -> Self {
-        Self::new(Keys::default())
-    }
-}
-
-impl<K: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default> ColumnWriter
-    for Lc<K, Keys, S>
-{
-    fn write_type_name(&self, out: &mut String) {
-        out.push_str("LowCardinality(");
-        self.dict.keys.write_type_name(out);
-        out.push(')');
-    }
-
-    fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
-        self.dict.write_prefix(out)
-    }
-
-    fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
-        self.dict.write_data(out)
-    }
-
-    fn write_default(&mut self) {
-        self.dict.write_default();
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        self.dict.keys.flush()
-    }
-
-    fn reserve(&mut self, rows: usize) {
-        self.dict.reserve(rows);
-    }
-
-    fn clear(&mut self) {
-        self.dict.clear();
-    }
-}
+lc_writer!(Lc, nullable = false, "LowCardinality(", ")");
+lc_writer!(
+    LcNullable,
+    nullable = true,
+    "LowCardinality(Nullable(",
+    "))"
+);
 
 impl<'a, Inner> Writable<'a> for reader::Lc<'a, Inner>
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: Default,
+    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
 {
-    type Writer = Lc<<Inner::Item as LcKey>::Key, Inner::Writer>;
+    type Writer = Lc<Inner::Writer>;
 }
 
-impl<'a, Inner, S> WriteColumn<'a, reader::Lc<'a, Inner>>
-    for Lc<<Inner::Item as LcKey>::Key, Inner::Writer, S>
+impl<'a, Inner, S> WriteColumn<'a, reader::Lc<'a, Inner>> for Lc<Inner::Writer, S>
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: Default,
+    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
     S: BuildHasher + Default,
 {
     fn for_reader(reader: &reader::Lc<'a, Inner>) -> Self {
@@ -333,12 +359,11 @@ where
     }
 }
 
-impl<K, Keys, S> WriteValue for Lc<K, Keys, S>
+impl<Keys, S> WriteValue for Lc<Keys, S>
 where
-    K: LcDictionaryKeyDefault,
-    Keys: WriteValue,
-    for<'a> Keys::Value<'a>: LcKey<Key = K>,
-    for<'a> K: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
+    Keys: LcKeys,
+    for<'a> Keys::Value<'a>: LcKey<Key = Keys::Key>,
+    for<'a> Keys::Key: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
     S: BuildHasher + Default,
 {
     type Value<'a> = Keys::Value<'a>;
@@ -348,85 +373,20 @@ where
     }
 }
 
-pub struct LcNullable<
-    K: LcDictionaryKeyDefault,
-    Keys: ColumnWriter,
-    S: BuildHasher + Default = FxBuildHasher,
-> {
-    dict: Dictionary<K, Keys, S>,
-}
-
-impl<K: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default>
-    LcNullable<K, Keys, S>
-{
-    pub fn new(keys: Keys) -> Self {
-        Self::with_capacity(keys, 0)
-    }
-
-    pub fn with_capacity(keys: Keys, capacity: usize) -> Self {
-        Self {
-            dict: Dictionary::new(keys, true, capacity),
-        }
-    }
-}
-
-impl<K: LcDictionaryKeyDefault, Keys: ColumnWriter + Default, S: BuildHasher + Default> Default
-    for LcNullable<K, Keys, S>
-{
-    fn default() -> Self {
-        Self::new(Keys::default())
-    }
-}
-
-impl<K: LcDictionaryKeyDefault, Keys: ColumnWriter, S: BuildHasher + Default> ColumnWriter
-    for LcNullable<K, Keys, S>
-{
-    fn write_type_name(&self, out: &mut String) {
-        out.push_str("LowCardinality(Nullable(");
-        self.dict.keys.write_type_name(out);
-        out.push_str("))");
-    }
-
-    fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
-        self.dict.write_prefix(out)
-    }
-
-    fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
-        self.dict.write_data(out)
-    }
-
-    fn write_default(&mut self) {
-        self.dict.write_default();
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        self.dict.keys.flush()
-    }
-
-    fn reserve(&mut self, rows: usize) {
-        self.dict.reserve(rows);
-    }
-
-    fn clear(&mut self) {
-        self.dict.clear();
-    }
-}
-
 impl<'a, Inner> Writable<'a> for reader::LcNullable<'a, Inner>
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: Default,
+    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
 {
-    type Writer = LcNullable<<Inner::Item as LcKey>::Key, Inner::Writer>;
+    type Writer = LcNullable<Inner::Writer>;
 }
 
-impl<'a, Inner, S> WriteColumn<'a, reader::LcNullable<'a, Inner>>
-    for LcNullable<<Inner::Item as LcKey>::Key, Inner::Writer, S>
+impl<'a, Inner, S> WriteColumn<'a, reader::LcNullable<'a, Inner>> for LcNullable<Inner::Writer, S>
 where
     Inner: Writable<'a> + 'a,
     Inner::Item: LcKey,
-    Inner::Writer: Default,
+    Inner::Writer: LcKeys<Key = <Inner::Item as LcKey>::Key> + Default,
     S: BuildHasher + Default,
 {
     fn for_reader(reader: &reader::LcNullable<'a, Inner>) -> Self {
@@ -449,12 +409,11 @@ where
     }
 }
 
-impl<K, Keys, S> WriteValue for LcNullable<K, Keys, S>
+impl<Keys, S> WriteValue for LcNullable<Keys, S>
 where
-    K: LcDictionaryKeyDefault,
-    Keys: WriteValue,
-    for<'a> Keys::Value<'a>: LcKey<Key = K>,
-    for<'a> K: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
+    Keys: LcKeys,
+    for<'a> Keys::Value<'a>: LcKey<Key = Keys::Key>,
+    for<'a> Keys::Key: Borrow<<Keys::Value<'a> as LcKey>::Lookup>,
     S: BuildHasher + Default,
 {
     type Value<'a> = Option<Keys::Value<'a>>;

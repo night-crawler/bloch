@@ -105,7 +105,7 @@ fn array_iter_values_preserve_empty_cells_and_reset_offsets() {
         vec![],
         vec![String::from("b")],
     ];
-    let mut writer = Array::new(Lc::<Box<str>, Str>::default());
+    let mut writer = Array::new(Lc::<Str>::default());
     for row in &rows {
         writer.write_iter(row.iter().map(String::as_str)).unwrap();
     }
@@ -341,7 +341,7 @@ fn low_cardinality_index_width_follows_dictionary_size() {
 
 #[derive(FromBlock, WriteBlock, Copy, Clone)]
 struct HashedLcRow<'a> {
-    #[col(writer = Lc<Box<str>, Str, std::hash::RandomState>)]
+    #[col(writer = Lc<Str, std::hash::RandomState>)]
     value: LcStr<'a>,
 }
 
@@ -547,8 +547,8 @@ fn low_cardinality_value_error_fails_the_block_at_write() {
 fn low_cardinality_owns_non_utf8_bytes_and_clears() {
     type Bytes<'a> = reader::Lc<'a, reader::Bytes<'a>>;
     type NullableBytes<'a> = reader::LcNullable<'a, reader::Bytes<'a>>;
-    let mut writer = Lc::<Box<[u8]>, super::Bytes>::default();
-    let mut nullable = LcNullable::<Box<[u8]>, super::Bytes>::default();
+    let mut writer = Lc::<super::Bytes>::default();
+    let mut nullable = LcNullable::<super::Bytes>::default();
     for pass in 0..2 {
         for i in 0..907 {
             let [lo, hi] = u16::try_from(i % 300).unwrap().to_le_bytes();
@@ -600,7 +600,7 @@ fn low_cardinality_owns_non_utf8_bytes_and_clears() {
 #[test]
 fn low_cardinality_preserves_float_bits() {
     type Floats<'a> = reader::Lc<'a, reader::F64<'a>>;
-    let mut writer = Lc::<u64, ConstSizeWriter<F64>>::default();
+    let mut writer = Lc::<ConstSizeWriter<F64>>::default();
     let bits = [
         0,
         (-0.0_f64).to_bits(),

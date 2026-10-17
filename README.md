@@ -278,7 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `WriteBlock` generates `RowWriter`, one column writer per field; a field can pick another
-writer with `#[col(writer = ...)]`, e.g. `writer::Lc<Box<str>, writer::Str, GxBuildHasher>` to hash
+writer with `#[col(writer = ...)]`, e.g. `writer::Lc<writer::Str, GxBuildHasher>` to hash
 `LowCardinality` dictionaries differently.
 
 It also generates `RowRow`, the same columns as plain values, for callers that have no parsed
