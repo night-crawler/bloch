@@ -697,7 +697,17 @@ fn derive_into_variant_inner(input: &DeriveInput) -> Result<TokenStream2, syn::E
 
     let writer_tys = readers
         .iter()
-        .map(|(_, ty)| quote! { <#ty as #bloch::writer::DefaultWriter<#lt>>::Writer });
+        .map(|(_, ty)| quote! { <#ty as #bloch::writer::DefaultWriter<#lt>>::Writer })
+        .collect::<Vec<_>>();
+    // The marker is lifetime-free, so its element writers are named through `'static`.
+    let column_tys = writer_tys
+        .iter()
+        .map(|ty| static_writer_type(ty.clone(), &lt))
+        .collect::<Vec<_>>();
+    let type_names = (0..readers.len()).map(|index| {
+        let tuple_idx = syn::Index::from(index);
+        quote! { #bloch::writer::ColumnWriter::type_name(&columns.#tuple_idx) }
+    });
     let writer_inits = readers.iter().enumerate().map(|(index, (_, ty))| {
         let tuple_idx = syn::Index::from(index);
         quote! { #bloch::writer::FromReader::<#lt, #ty>::from_reader(&readers.#tuple_idx) }
@@ -720,18 +730,22 @@ fn derive_into_variant_inner(input: &DeriveInput) -> Result<TokenStream2, syn::E
         impl #bloch::writer::VariantValue for #name_ident {
             const TYPE_NAME: ::core::option::Option<&'static str> = #type_name;
             type Value<#lt> = #ident #ty_generics;
+            type Columns = (#(#column_tys,)*);
+
+            fn type_names(columns: &Self::Columns) -> ::std::vec::Vec<::std::borrow::Cow<'static, str>> {
+                ::std::vec![#(#type_names,)*]
+            }
         }
 
         #[automatically_derived]
         impl<#lt> #bloch::writer::IntoVariant<#lt> for #ident #ty_generics {
-            type Columns = (#(#writer_tys,)*);
             type Marker = #name_ident;
 
-            fn columns(readers: &Self::Readers) -> Self::Columns {
+            fn columns(readers: &Self::Readers) -> (#(#writer_tys,)*) {
                 (#(#writer_inits,)*)
             }
 
-            fn write(self, columns: &mut Self::Columns) -> #bloch::Result<u8> {
+            fn write(self, columns: &mut (#(#writer_tys,)*)) -> #bloch::Result<u8> {
                 match self {
                     #(#write_arms)*
                 }

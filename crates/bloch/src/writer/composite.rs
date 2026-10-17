@@ -1,12 +1,10 @@
 use std::{
     borrow::Cow,
     io::{self, Write},
-    marker::PhantomData,
 };
 
 use super::{
-    ColumnTuple, ColumnWriter, DefaultWriter, FromReader, IntoVariant, ValueWriter, VariantValue,
-    write_offsets,
+    ColumnWriter, DefaultWriter, FromReader, IntoVariant, ValueWriter, VariantValue, write_offsets,
 };
 use crate::{Result, reader};
 
@@ -329,17 +327,11 @@ where
 
 macro_rules! tuples {
     ($($idx:tt => $t:ident),+) => {
-        impl<$($t: ColumnWriter,)+> ColumnTuple for ($($t,)+) {
-            fn type_names(&self) -> Vec<Cow<'static, str>> {
-                vec![$(self.$idx.type_name(),)+]
-            }
-        }
-
         impl<$($t: ColumnWriter,)+> ColumnWriter for ($($t,)+) {
             fn type_name(&self) -> Cow<'static, str> {
-                format!("Tuple({})", self.type_names().join(",")).into()
+                let names = [$(self.$idx.type_name(),)+];
+                format!("Tuple({})", names.join(",")).into()
             }
-
             fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
                 $(self.$idx.write_prefix(out)?;)+
                 Ok(())
@@ -407,42 +399,43 @@ tuples!(0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H);
 tuples!(0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H, 8 => I);
 tuples!(0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H, 8 => I, 9 => J);
 
-pub struct Variant<C: ColumnTuple, V: VariantValue> {
+pub struct Variant<V: VariantValue> {
     discriminators: Vec<u8>,
-    columns: C,
-    marker: PhantomData<fn() -> V>,
+    columns: V::Columns,
 }
 
-impl<C: ColumnTuple, V: VariantValue> Variant<C, V> {
-    pub const fn new(columns: C) -> Self {
+impl<V: VariantValue> Variant<V> {
+    pub const fn new(columns: V::Columns) -> Self {
         Self {
             discriminators: Vec::new(),
             columns,
-            marker: PhantomData,
         }
     }
 
-    fn push<'a>(&mut self, value: impl IntoVariant<'a, Columns = C>) -> Result<()> {
+    fn push<'a>(&mut self, value: impl IntoVariant<'a, Marker = V>) -> Result<()> {
         let discriminator = value.write(&mut self.columns)?;
         self.discriminators.push(discriminator);
         Ok(())
     }
 }
 
-impl<C: ColumnTuple + Default, V: VariantValue> Default for Variant<C, V> {
+impl<V: VariantValue> Default for Variant<V>
+where
+    V::Columns: Default,
+{
     fn default() -> Self {
-        Self::new(C::default())
+        Self::new(V::Columns::default())
     }
 }
 
-impl<C: ColumnTuple, V: VariantValue> ColumnWriter for Variant<C, V> {
+impl<V: VariantValue> ColumnWriter for Variant<V> {
     /// Panics unless the elements are declared in ClickHouse's order (sorted by type name),
     /// as the discriminators would otherwise name the wrong elements.
     fn type_name(&self) -> Cow<'static, str> {
         if let Some(name) = V::TYPE_NAME {
             return name.into();
         }
-        let names = self.columns.type_names();
+        let names = V::type_names(&self.columns);
         assert!(
             names.is_sorted(),
             "declare enum variants sorted by ClickHouse type name, not as Variant({})",
@@ -482,12 +475,10 @@ impl<C: ColumnTuple, V: VariantValue> ColumnWriter for Variant<C, V> {
 }
 
 impl<'a, T: IntoVariant<'a> + 'a> DefaultWriter<'a> for reader::Variant<'a, T> {
-    type Writer = Variant<T::Columns, T::Marker>;
+    type Writer = Variant<T::Marker>;
 }
 
-impl<'a, T: IntoVariant<'a> + 'a> FromReader<'a, reader::Variant<'a, T>>
-    for Variant<T::Columns, T::Marker>
-{
+impl<'a, T: IntoVariant<'a> + 'a> FromReader<'a, reader::Variant<'a, T>> for Variant<T::Marker> {
     fn from_reader(reader: &reader::Variant<'a, T>) -> Self {
         Self::new(T::columns(&reader.readers))
     }
@@ -498,11 +489,11 @@ impl<'a, T: IntoVariant<'a> + 'a> FromReader<'a, reader::Variant<'a, T>>
 }
 
 impl<'a, T: IntoVariant<'a> + 'a> DefaultWriter<'a> for reader::VariantNullable<'a, T> {
-    type Writer = Variant<T::Columns, T::Marker>;
+    type Writer = Variant<T::Marker>;
 }
 
 impl<'a, T: IntoVariant<'a> + 'a> FromReader<'a, reader::VariantNullable<'a, T>>
-    for Variant<T::Columns, T::Marker>
+    for Variant<T::Marker>
 {
     fn from_reader(reader: &reader::VariantNullable<'a, T>) -> Self {
         Self::new(T::columns(&reader.inner.readers))
@@ -519,9 +510,9 @@ impl<'a, T: IntoVariant<'a> + 'a> FromReader<'a, reader::VariantNullable<'a, T>>
     }
 }
 
-impl<C: ColumnTuple, V: VariantValue> ValueWriter for Variant<C, V>
+impl<V: VariantValue> ValueWriter for Variant<V>
 where
-    for<'a> V::Value<'a>: IntoVariant<'a, Columns = C>,
+    for<'a> V::Value<'a>: IntoVariant<'a, Marker = V>,
 {
     type Value<'a> = Option<V::Value<'a>>;
 
