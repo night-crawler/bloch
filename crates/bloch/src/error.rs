@@ -46,6 +46,15 @@ pub enum Error {
 
     #[error("Column not found: {0}")]
     ColumnNotFound(String),
+
+    #[error("An earlier row failed to write; the block is invalid")]
+    WriteFailed,
+
+    #[error("Value of {0} bytes does not fit FixedString({1})")]
+    FixedStringOverflow(usize, usize),
+
+    #[error("Io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub(crate) fn decode_utf8(bytes: &[u8]) -> crate::Result<&str> {

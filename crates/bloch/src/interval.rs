@@ -40,6 +40,20 @@ impl Kind {
         !matches!(self, Self::Month | Self::Quarter | Self::Year)
     }
 
+    pub const fn unit_nanos(self) -> Option<i64> {
+        match self {
+            Self::Nanosecond => Some(1),
+            Self::Microsecond => Some(1_000),
+            Self::Millisecond => Some(1_000_000),
+            Self::Second => Some(1_000_000_000),
+            Self::Minute => Some(60_000_000_000),
+            Self::Hour => Some(3_600_000_000_000),
+            Self::Day => Some(86_400_000_000_000),
+            Self::Week => Some(604_800_000_000_000),
+            Self::Month | Self::Quarter | Self::Year => None,
+        }
+    }
+
     pub fn to_time_delta(self, count: i64) -> crate::Result<TimeDelta> {
         let delta = match self {
             Self::Nanosecond => Some(TimeDelta::nanoseconds(count)),

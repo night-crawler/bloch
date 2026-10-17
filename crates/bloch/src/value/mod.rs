@@ -363,13 +363,16 @@ impl<'a> Iterator for LowCardinalitySliceIterator<'a> {
 
 impl ExactSizeIterator for LowCardinalitySliceIterator<'_> {}
 
-pub struct ArraySliceIterator<'a, T> {
+pub struct ArraySliceIterator<'a, T: TryFrom<Value<'a>, Error = Error>> {
     mark: &'a mark::Array<'a>,
     range: Range<usize>,
     _phantom: PhantomData<T>,
 }
 
-impl<'a, T> TryFrom<Value<'a>> for ArraySliceIterator<'a, T> {
+impl<'a, T> TryFrom<Value<'a>> for ArraySliceIterator<'a, T>
+where
+    T: TryFrom<Value<'a>, Error = Error>,
+{
     type Error = Error;
 
     fn try_from(value: Value<'a>) -> Result<Self, Self::Error> {
@@ -496,7 +499,11 @@ impl_try_from_tuple!(8, 0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 
 impl_try_from_tuple!(9, 0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H, 8 => I);
 impl_try_from_tuple!(10, 0 => A, 1 => B, 2 => C, 3 => D, 4 => E, 5 => F, 6 => G, 7 => H, 8 => I, 9 => J);
 
-pub struct MapIterator<'a, K, V> {
+pub struct MapIterator<'a, K, V>
+where
+    K: TryFrom<Value<'a>, Error = Error>,
+    V: TryFrom<Value<'a>, Error = Error>,
+{
     pub(crate) keys: &'a mark::Mark<'a>,
     pub(crate) values: &'a mark::Mark<'a>,
     pub(crate) range: Range<usize>,
@@ -580,7 +587,11 @@ where
 {
 }
 
-pub struct MapSliceIterator<'a, K, V> {
+pub struct MapSliceIterator<'a, K, V>
+where
+    K: TryFrom<Value<'a>, Error = Error>,
+    V: TryFrom<Value<'a>, Error = Error>,
+{
     pub(crate) offsets: &'a Offsets<'a>,
     pub(crate) keys: &'a mark::Mark<'a>,
     pub(crate) values: &'a mark::Mark<'a>,

@@ -7,7 +7,7 @@ use std::hint::cold_path;
 use std::ops::Range;
 
 #[derive(Clone, Copy)]
-pub struct Nullable<'a, Inner> {
+pub struct Nullable<'a, Inner: TryRead<'a>> {
     pub(crate) mark: &'a mark::Nullable<'a>,
     pub(crate) inner: Inner,
 }
@@ -60,9 +60,9 @@ impl<'a, Inner: TryRead<'a> + 'a> TryRead<'a> for Nullable<'a, Inner> {
 }
 
 #[derive(Clone, Copy)]
-pub struct Lc<'a, Inner> {
+pub struct Lc<'a, Inner: TryRead<'a>> {
     indices: mark::lc::Indices<'a>,
-    dict: Option<Inner>,
+    pub(crate) dict: Option<Inner>,
 }
 
 pub type LcStr<'a> = Lc<'a, Str<'a>>;
@@ -120,9 +120,9 @@ impl<'a, Inner: TryRead<'a> + 'a> Lc<'a, Inner> {
 }
 
 #[derive(Clone, Copy)]
-pub struct LcNullable<'a, Inner> {
+pub struct LcNullable<'a, Inner: TryRead<'a>> {
     indices: mark::lc::Indices<'a>,
-    dict: Option<Inner>,
+    pub(crate) dict: Option<Inner>,
 }
 
 pub type LcNullableStr<'a> = LcNullable<'a, Str<'a>>;
@@ -440,7 +440,7 @@ where
 /// This will error on NULLs, use [`VariantNullable`] for nullable columns.
 pub struct Variant<'a, T: FromVariant<'a>> {
     mark: &'a VariantMark<'a>,
-    readers: T::Readers,
+    pub(crate) readers: T::Readers,
 }
 
 impl<'a, T: FromVariant<'a>> Clone for Variant<'a, T> {
@@ -507,7 +507,7 @@ impl<'a, T: FromVariant<'a> + 'a> Variant<'a, T> {
 
 /// Same as [`Variant`] that yields `None` for NULL rows.
 pub struct VariantNullable<'a, T: FromVariant<'a>> {
-    inner: Variant<'a, T>,
+    pub(crate) inner: Variant<'a, T>,
 }
 
 impl<'a, T: FromVariant<'a>> Clone for VariantNullable<'a, T> {

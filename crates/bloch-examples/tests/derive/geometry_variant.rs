@@ -1,6 +1,6 @@
 use bloch::FromBlock;
 use bloch::parse::block::parse_single;
-use bloch::reader::{Array, ArrayIter, Geometry, I64, Point, Ring, VariantNullable};
+use bloch::reader::{Array, ArrayIter, Geometry, I64, Point, Ring, TryRead, VariantNullable};
 
 const _SQL: &str = r#"
 -- Geometry / MultiPoint: MultiPoint is unknown to ClickHouse 26.3 and older
@@ -45,7 +45,11 @@ fn ring<'a>(points: ArrayIter<'a, Point<'a>>) -> bloch::Result<Vec<(f64, f64)>> 
     points.try_collect_vec()
 }
 
-fn polygon<'a>(rings: ArrayIter<'a, Ring<'a>>) -> bloch::Result<Vec<Vec<(f64, f64)>>> {
+/// Rings of a `Polygon` or lines of a `MultiLineString`: both are arrays of point arrays.
+fn polygon<'a, Line>(rings: ArrayIter<'a, Line>) -> bloch::Result<Vec<Vec<(f64, f64)>>>
+where
+    Line: TryRead<'a, Item = ArrayIter<'a, Point<'a>>>,
+{
     rings.map(|r| ring(r?)).collect()
 }
 
