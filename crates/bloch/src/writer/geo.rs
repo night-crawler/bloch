@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use super::{Array, ColumnWriter, DefaultWriter, F64, FixedWidthColumn, FromReader, ValueWriter};
@@ -11,8 +12,8 @@ macro_rules! geo {
         pub struct $name(pub $writer);
 
         impl ColumnWriter for $name {
-            fn type_name(&self, out: &mut String) {
-                out.push_str($spelling);
+            fn type_name(&self) -> Cow<'static, str> {
+                $spelling.into()
             }
 
             fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {

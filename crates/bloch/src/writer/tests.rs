@@ -66,9 +66,7 @@ fn single_column_block(name: &str, writer: &mut dyn ColumnWriter, rows: usize) -
 }
 
 fn type_name(writer: &dyn ColumnWriter) -> String {
-    let mut name = String::new();
-    writer.type_name(&mut name);
-    name
+    writer.type_name().into_owned()
 }
 
 #[derive(FromBlock, WriteBlock, Copy, Clone)]

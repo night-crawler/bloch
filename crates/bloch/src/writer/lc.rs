@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
 use std::io::{self, Write};
@@ -285,10 +285,8 @@ macro_rules! lc_writer {
         }
 
         impl<Inner: LcColumn, S: BuildHasher + Default> ColumnWriter for $name<Inner, S> {
-            fn type_name(&self, out: &mut String) {
-                out.push_str($open);
-                self.dict.inner.type_name(out);
-                out.push_str($close);
+            fn type_name(&self) -> Cow<'static, str> {
+                format!(concat!($open, "{}", $close), self.dict.inner.type_name()).into()
             }
 
             fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {

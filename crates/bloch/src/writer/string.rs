@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use bstr::BStr;
@@ -17,8 +17,8 @@ macro_rules! strings {
         }
 
         impl ColumnWriter for $writer {
-            fn type_name(&self, out: &mut String) {
-                out.push_str("String");
+            fn type_name(&self) -> Cow<'static, str> {
+                "String".into()
             }
 
             fn write_prefix(&self, _out: &mut dyn Write) -> io::Result<()> {
@@ -84,8 +84,8 @@ macro_rules! fixed_strings {
         impl FixedWidth for $fixed {
             type Value<'a> = $value;
 
-            fn type_name(&self, out: &mut String) {
-                let _ = write!(out, "FixedString({})", self.size);
+            fn type_name(&self) -> Cow<'static, str> {
+                format!("FixedString({})", self.size).into()
             }
 
             fn width(&self) -> usize {

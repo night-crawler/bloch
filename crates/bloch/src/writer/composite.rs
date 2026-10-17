@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io::{self, Write},
     marker::PhantomData,
 };
@@ -30,10 +31,8 @@ impl<Inner: ColumnWriter + Default> Default for Nullable<Inner> {
 }
 
 impl<Inner: ColumnWriter> ColumnWriter for Nullable<Inner> {
-    fn type_name(&self, out: &mut String) {
-        out.push_str("Nullable(");
-        self.inner.type_name(out);
-        out.push(')');
+    fn type_name(&self) -> Cow<'static, str> {
+        format!("Nullable({})", self.inner.type_name()).into()
     }
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
@@ -152,10 +151,8 @@ impl<Values: ColumnWriter + Default> Default for Array<Values> {
 }
 
 impl<Values: ColumnWriter> ColumnWriter for Array<Values> {
-    fn type_name(&self, out: &mut String) {
-        out.push_str("Array(");
-        self.values.type_name(out);
-        out.push(')');
+    fn type_name(&self) -> Cow<'static, str> {
+        format!("Array({})", self.values.type_name()).into()
     }
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
@@ -239,12 +236,8 @@ impl<Keys: ColumnWriter + Default, Values: ColumnWriter + Default> Default for M
 }
 
 impl<Keys: ColumnWriter, Values: ColumnWriter> ColumnWriter for Map<Keys, Values> {
-    fn type_name(&self, out: &mut String) {
-        out.push_str("Map(");
-        self.keys.type_name(out);
-        out.push(',');
-        self.values.type_name(out);
-        out.push(')');
+    fn type_name(&self) -> Cow<'static, str> {
+        format!("Map({},{})", self.keys.type_name(), self.values.type_name()).into()
     }
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
@@ -337,12 +330,14 @@ where
 macro_rules! tuples {
     ($($idx:tt => $t:ident),+) => {
         impl<$($t: ColumnWriter,)+> ColumnTuple for ($($t,)+) {
-            fn type_names(&self, out: &mut Vec<String>) {
-                $(
-                    let mut name = String::new();
-                    self.$idx.type_name(&mut name);
-                    out.push(name);
-                )+
+            fn type_names(&self) -> Vec<Cow<'static, str>> {
+                vec![$(self.$idx.type_name(),)+]
+            }
+        }
+
+        impl<$($t: ColumnWriter,)+> ColumnWriter for ($($t,)+) {
+            fn type_name(&self) -> Cow<'static, str> {
+                format!("Tuple({})", self.type_names().join(",")).into()
             }
 
             fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
@@ -370,40 +365,6 @@ macro_rules! tuples {
             fn flush(&mut self) -> Result<()> {
                 $(self.$idx.flush()?;)+
                 Ok(())
-            }
-        }
-
-        impl<$($t: ColumnWriter,)+> ColumnWriter for ($($t,)+) {
-            fn type_name(&self, out: &mut String) {
-                let mut names = Vec::new();
-                self.type_names(&mut names);
-                out.push_str("Tuple(");
-                out.push_str(&names.join(","));
-                out.push(')');
-            }
-
-            fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
-                ColumnTuple::write_prefix(self, out)
-            }
-
-            fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
-                ColumnTuple::write_data(self, out)
-            }
-
-            fn push_default(&mut self) {
-                ColumnTuple::push_default(self);
-            }
-
-            fn reserve(&mut self, rows: usize) {
-                ColumnTuple::reserve(self, rows);
-            }
-
-            fn clear(&mut self) {
-                ColumnTuple::clear(self);
-            }
-
-            fn flush(&mut self) -> Result<()> {
-                ColumnTuple::flush(self)
             }
         }
 
@@ -477,21 +438,17 @@ impl<C: ColumnTuple + Default, V: VariantValue> Default for Variant<C, V> {
 impl<C: ColumnTuple, V: VariantValue> ColumnWriter for Variant<C, V> {
     /// Panics unless the elements are declared in ClickHouse's order (sorted by type name),
     /// as the discriminators would otherwise name the wrong elements.
-    fn type_name(&self, out: &mut String) {
+    fn type_name(&self) -> Cow<'static, str> {
         if let Some(name) = V::TYPE_NAME {
-            out.push_str(name);
-            return;
+            return name.into();
         }
-        let mut names = Vec::new();
-        self.columns.type_names(&mut names);
+        let names = self.columns.type_names();
         assert!(
             names.is_sorted(),
             "declare enum variants sorted by ClickHouse type name, not as Variant({})",
             names.join(", ")
         );
-        out.push_str("Variant(");
-        out.push_str(&names.join(","));
-        out.push(')');
+        format!("Variant({})", names.join(",")).into()
     }
 
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {

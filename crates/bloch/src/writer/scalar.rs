@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -30,8 +31,8 @@ macro_rules! scalars {
         impl FixedWidth for $name {
             type Value<'a> = $item;
 
-            fn type_name(&self, out: &mut String) {
-                out.push_str($type_name);
+            fn type_name(&self) -> Cow<'static, str> {
+                $type_name.into()
             }
 
             fn width(&self) -> usize {
@@ -92,8 +93,8 @@ pub struct Nothing;
 impl FixedWidth for Nothing {
     type Value<'a> = ();
 
-    fn type_name(&self, out: &mut String) {
-        out.push_str("Nothing");
+    fn type_name(&self) -> Cow<'static, str> {
+        "Nothing".into()
     }
 
     fn width(&self) -> usize {
@@ -133,13 +134,14 @@ pub struct Usize {
 impl FixedWidth for Usize {
     type Value<'a> = usize;
 
-    fn type_name(&self, out: &mut String) {
-        out.push_str(match self.width {
+    fn type_name(&self) -> Cow<'static, str> {
+        match self.width {
             1 => "UInt8",
             2 => "UInt16",
             4 => "UInt32",
             _ => "UInt64",
-        });
+        }
+        .into()
     }
 
     fn width(&self) -> usize {
@@ -209,16 +211,17 @@ macro_rules! enums {
         impl FixedWidth for $name {
             type Value<'a> = &'a str;
 
-            fn type_name(&self, out: &mut String) {
-                out.push_str(concat!($type_name, "("));
+            fn type_name(&self) -> Cow<'static, str> {
+                let mut out = String::from(concat!($type_name, "("));
                 for (index, (name, id)) in self.variants.iter().enumerate() {
                     if index != 0 {
                         out.push_str(", ");
                     }
-                    write_quoted(name, out);
+                    write_quoted(name, &mut out);
                     let _ = write!(out, " = {id}");
                 }
                 out.push(')');
+                out.into()
             }
 
             fn width(&self) -> usize {
@@ -265,10 +268,10 @@ enums! {
     Enum16: i16 => "Enum16";
 }
 
-fn write_tz(tz: Option<Tz>, out: &mut String) {
-    if let Some(tz) = tz {
-        write_quoted(tz.name(), out);
-    }
+fn quoted_tz(tz: Tz) -> String {
+    let mut out = String::new();
+    write_quoted(tz.name(), &mut out);
+    out
 }
 
 #[derive(Default, Clone, Copy)]
@@ -279,12 +282,10 @@ pub struct DateTime {
 impl FixedWidth for DateTime {
     type Value<'a> = chrono::DateTime<Utc>;
 
-    fn type_name(&self, out: &mut String) {
-        out.push_str("DateTime");
-        if self.tz.is_some() {
-            out.push('(');
-            write_tz(self.tz, out);
-            out.push(')');
+    fn type_name(&self) -> Cow<'static, str> {
+        match self.tz {
+            Some(tz) => format!("DateTime({})", quoted_tz(tz)).into(),
+            None => "DateTime".into(),
         }
     }
 
@@ -329,13 +330,11 @@ pub struct DateTime64 {
 impl FixedWidth for DateTime64 {
     type Value<'a> = chrono::DateTime<Utc>;
 
-    fn type_name(&self, out: &mut String) {
-        let _ = write!(out, "DateTime64({}", self.precision);
-        if self.tz.is_some() {
-            out.push_str(", ");
-            write_tz(self.tz, out);
+    fn type_name(&self) -> Cow<'static, str> {
+        match self.tz {
+            Some(tz) => format!("DateTime64({}, {})", self.precision, quoted_tz(tz)).into(),
+            None => format!("DateTime64({})", self.precision).into(),
         }
-        out.push(')');
     }
 
     fn width(&self) -> usize {
@@ -375,8 +374,8 @@ pub struct Time64 {
 impl FixedWidth for Time64 {
     type Value<'a> = TimeDelta;
 
-    fn type_name(&self, out: &mut String) {
-        let _ = write!(out, "Time64({})", self.precision);
+    fn type_name(&self) -> Cow<'static, str> {
+        format!("Time64({})", self.precision).into()
     }
 
     fn width(&self) -> usize {
@@ -413,9 +412,8 @@ pub struct Interval {
 impl FixedWidth for Interval {
     type Value<'a> = TimeDelta;
 
-    fn type_name(&self, out: &mut String) {
-        out.push_str("Interval");
-        out.push_str(self.kind.as_str());
+    fn type_name(&self) -> Cow<'static, str> {
+        format!("Interval{}", self.kind.as_str()).into()
     }
 
     fn width(&self) -> usize {
@@ -470,8 +468,8 @@ macro_rules! decimals {
         impl FixedWidth for $name {
             type Value<'a> = Decimal;
 
-            fn type_name(&self, out: &mut String) {
-                let _ = write!(out, "Decimal({}, {})", $precision, self.scale);
+            fn type_name(&self) -> Cow<'static, str> {
+                format!("Decimal({}, {})", $precision, self.scale).into()
             }
 
             fn width(&self) -> usize {
