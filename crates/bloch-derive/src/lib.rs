@@ -489,6 +489,9 @@ fn derive_write_block_inner(input: &DeriveInput) -> Result<TokenStream2, syn::Er
     let clear_fields = specs.iter().map(|ColSpec { ident, .. }| {
         quote! { #bloch::writer::ColumnWriter::clear(&mut self.#ident); }
     });
+    let data_len_fields = specs.iter().map(|ColSpec { ident, .. }| {
+        quote! { + #bloch::writer::ColumnWriter::data_len(&self.#ident) }
+    });
     let flush_fields = specs.iter().map(|ColSpec { ident, .. }| {
         quote! { #bloch::writer::ColumnWriter::flush(&mut self.#ident)?; }
     });
@@ -519,6 +522,10 @@ fn derive_write_block_inner(input: &DeriveInput) -> Result<TokenStream2, syn::Er
 
             fn clear(&mut self) {
                 #(#clear_fields)*
+            }
+
+            fn data_len(&self) -> usize {
+                0 #(#data_len_fields)*
             }
 
             fn flush(&mut self) -> #bloch::Result<()> {

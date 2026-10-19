@@ -234,18 +234,26 @@ impl<Inner: LcColumn, S: BuildHasher + Default> Dictionary<Inner, S> {
         out.write_all(&LOW_CARDINALITY_VERSION.to_le_bytes())
     }
 
-    fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
-        if self.indices.is_empty() {
-            return Ok(());
-        }
-        let dictionary_size = self.slots.len() + usize::from(self.nullable);
-        let index_type = if dictionary_size <= 1 << 8 {
+    const fn index_type(dictionary_size: usize) -> u64 {
+        if dictionary_size <= 1 << 8 {
             TUINT8
         } else if dictionary_size <= 1 << 16 {
             TUINT16
         } else {
             TUINT32
-        };
+        }
+    }
+
+    fn dictionary_size(&self) -> usize {
+        self.slots.len() + usize::from(self.nullable)
+    }
+
+    fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
+        if self.indices.is_empty() {
+            return Ok(());
+        }
+        let dictionary_size = self.dictionary_size();
+        let index_type = Self::index_type(dictionary_size);
         let flags = HAS_ADDITIONAL_KEYS_BIT | NEED_UPDATE_DICTIONARY_BIT | index_type;
         out.write_all(&flags.to_le_bytes())?;
         out.write_all(&(dictionary_size as u64).to_le_bytes())?;
@@ -263,6 +271,19 @@ impl<Inner: LcColumn, S: BuildHasher + Default> Dictionary<Inner, S> {
             ),
             _ => write_le(&self.indices, u32::to_le_bytes, out),
         }
+    }
+
+    fn data_len(&self) -> usize {
+        if self.indices.is_empty() {
+            return 0;
+        }
+        let index_width = match Self::index_type(self.dictionary_size()) {
+            TUINT8 => 1,
+            TUINT16 => 2,
+            _ => 4,
+        };
+        // flags + dictionary size + keys + index count + indices
+        3 * size_of::<u64>() + self.inner.data_len() + self.indices.len() * index_width
     }
 
     fn push_default(&mut self) {
@@ -318,6 +339,10 @@ macro_rules! lc_writer {
 
             fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
                 self.dict.write_data(out)
+            }
+
+            fn data_len(&self) -> usize {
+                self.dict.data_len()
             }
 
             fn push_default(&mut self) {

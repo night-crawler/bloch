@@ -42,6 +42,10 @@ impl<Inner: ColumnWriter> ColumnWriter for Nullable<Inner> {
         self.inner.write_data(out)
     }
 
+    fn data_len(&self) -> usize {
+        self.nulls.len() + self.inner.data_len()
+    }
+
     fn push_default(&mut self) {
         self.nulls.push(1);
         self.inner.push_default();
@@ -162,6 +166,10 @@ impl<Values: ColumnWriter> ColumnWriter for Array<Values> {
         self.values.write_data(out)
     }
 
+    fn data_len(&self) -> usize {
+        self.offsets.len() * size_of::<u64>() + self.values.data_len()
+    }
+
     fn push_default(&mut self) {
         self.offsets.push(self.offsets.last().copied().unwrap_or(0));
     }
@@ -251,6 +259,10 @@ impl<Keys: ColumnWriter, Values: ColumnWriter> ColumnWriter for Map<Keys, Values
         write_offsets(&self.offsets, out)?;
         self.keys.write_data(out)?;
         self.values.write_data(out)
+    }
+
+    fn data_len(&self) -> usize {
+        self.offsets.len() * size_of::<u64>() + self.keys.data_len() + self.values.data_len()
     }
 
     fn push_default(&mut self) {
@@ -344,6 +356,10 @@ macro_rules! tuples {
             fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
                 $(self.$idx.write_data(out)?;)+
                 Ok(())
+            }
+
+            fn data_len(&self) -> usize {
+                0 $(+ self.$idx.data_len())+
             }
 
             fn push_default(&mut self) {
@@ -456,6 +472,10 @@ impl<V: VariantValue> ColumnWriter for Variant<V> {
     fn write_data(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&self.discriminators)?;
         self.columns.write_data(out)
+    }
+
+    fn data_len(&self) -> usize {
+        self.discriminators.len() + self.columns.data_len()
     }
 
     fn push_default(&mut self) {

@@ -24,6 +24,10 @@ macro_rules! geo {
                 ColumnWriter::write_data(&self.0, out)
             }
 
+            fn data_len(&self) -> usize {
+                ColumnWriter::data_len(&self.0)
+            }
+
             fn push_default(&mut self) {
                 ColumnWriter::push_default(&mut self.0);
             }

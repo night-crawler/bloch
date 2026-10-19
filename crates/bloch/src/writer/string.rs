@@ -29,6 +29,10 @@ macro_rules! strings {
                 out.write_all(&self.data)
             }
 
+            fn data_len(&self) -> usize {
+                self.data.len()
+            }
+
             fn push_default(&mut self) {
                 self.data.push(0);
             }

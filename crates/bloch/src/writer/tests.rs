@@ -61,6 +61,9 @@ fn single_column_block(name: &str, writer: &mut dyn ColumnWriter, rows: usize) -
     let mut out = vec![1];
     write_varuint(rows as u64, &mut out);
     writer.flush().unwrap();
+    let mut data = Vec::new();
+    writer.write_data(&mut data).unwrap();
+    assert_eq!(writer.data_len(), data.len(), "{}", type_name(writer));
     encode_column(name, writer, rows, &mut out).unwrap();
     out
 }
@@ -436,8 +439,15 @@ fn low_cardinality_index_width_follows_dictionary_size() {
                 value: &String::from("1"),
             })
             .unwrap();
+        // Header, column name and type, 8-byte LowCardinality prefix, then exactly the data.
+        let mut overhead = vec![1];
+        write_varuint(writer.rows() as u64, &mut overhead);
+        write_string(b"value", &mut overhead);
+        write_string(b"LowCardinality(String)", &mut overhead);
+        let expected_len = overhead.len() + 8 + writer.data_len();
         let mut bytes = Vec::new();
         writer.encode(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), expected_len, "dictionary of {dictionary_size}");
         let block = parse(&bytes);
         let Mark::LowCardinality(lc) = &block.markers[0] else {
             panic!("not LowCardinality");

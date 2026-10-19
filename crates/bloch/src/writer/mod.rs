@@ -27,6 +27,7 @@ pub trait ColumnWriter {
     fn type_name(&self) -> Cow<'static, str>;
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()>;
     fn write_data(&self, out: &mut dyn Write) -> io::Result<()>;
+    fn data_len(&self) -> usize;
     fn push_default(&mut self);
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -121,6 +122,10 @@ impl<T: FixedWidth> ColumnWriter for FixedWidthColumn<T> {
         out.write_all(&self.data)
     }
 
+    fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
     fn push_default(&mut self) {
         self.ty.push_default(&mut self.data);
     }
@@ -148,6 +153,8 @@ pub trait RowWriter {
 
     fn reserve(&mut self, rows: usize);
     fn clear(&mut self);
+    /// Sum of every column's [`ColumnWriter::data_len`].
+    fn data_len(&self) -> usize;
     fn flush(&mut self) -> Result<()>;
     fn encode(&self, rows: usize, out: &mut dyn Write) -> io::Result<()>;
 }
@@ -176,6 +183,10 @@ impl<A: RowWriter, B: RowWriter> RowWriter for (A, B) {
     fn clear(&mut self) {
         self.0.clear();
         self.1.clear();
+    }
+
+    fn data_len(&self) -> usize {
+        self.0.data_len() + self.1.data_len()
     }
 
     fn flush(&mut self) -> Result<()> {

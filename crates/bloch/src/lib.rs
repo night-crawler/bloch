@@ -385,6 +385,12 @@ impl<W: writer::RowWriter> BlockWriter<W> {
         self.rows
     }
 
+    /// Bytes of column data buffered for the current block: the encoded block size without
+    /// its header, column names, types and prefixes.
+    pub fn data_len(&self) -> usize {
+        self.writer.data_len()
+    }
+
     /// Writes the block to `out` and empties the writer. `out` is used as-is: a `Vec<u8>`, a
     /// `BufWriter`, a compressing encoder; nothing is buffered here beyond the column data.
     pub fn encode(&mut self, out: &mut impl io::Write) -> Result<()> {
