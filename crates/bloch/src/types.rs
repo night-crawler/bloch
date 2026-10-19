@@ -200,8 +200,9 @@ pub enum Type<'a> {
 
     Date,
     Date32,
-    DateTime(Tz),
-    DateTime64(u8, Tz),
+    /// `None` is the server timezone, read as UTC.
+    DateTime(Option<Tz>),
+    DateTime64(u8, Option<Tz>),
     /// Signed seconds as `Int32` (`DataTypeTime : DataTypeNumberBase<Int32>`); no timezone.
     /// ClickHouse saturates only the text form at `±999:59:59`; stored values may exceed it.
     Time,
@@ -454,12 +455,14 @@ impl<'a> Type<'a> {
             Type::Date => Mark::Date(ByteView::try_from(data)?),
             Type::Date32 => Mark::Date32(ByteView::try_from(data)?),
             Type::DateTime(tz) => Mark::DateTime(DateTime {
-                tz,
+                tz: tz.unwrap_or(Tz::UTC),
+                explicit_tz: tz.is_some(),
                 data: ByteView::try_from(data)?,
             }),
             Type::DateTime64(precision, tz) => Mark::DateTime64(DateTime64 {
                 precision,
-                tz,
+                tz: tz.unwrap_or(Tz::UTC),
+                explicit_tz: tz.is_some(),
                 data: ByteView::try_from(data)?,
             }),
             Type::Time => Mark::Time(ByteView::try_from(data)?),

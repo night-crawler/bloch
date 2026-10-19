@@ -32,6 +32,24 @@ impl<'a> LowCardinality<'a> {
     }
 
     #[inline(always)]
+    pub fn key(&self, index: usize) -> crate::Result<Option<(&Mark<'a>, usize)>> {
+        self.not_nullable()?;
+        match self.value_index(index)? {
+            Some(value_index) => Ok(Some((self.keys()?, value_index))),
+            None => Ok(None),
+        }
+    }
+
+    #[inline(always)]
+    pub fn opt_key(&self, index: usize) -> crate::Result<Option<Option<(&Mark<'a>, usize)>>> {
+        match self.value_index(index)? {
+            None => Ok(None),
+            Some(value_index) if self.is_null(value_index) => Ok(Some(None)),
+            Some(value_index) => Ok(Some(Some((self.keys()?, value_index)))),
+        }
+    }
+
+    #[inline(always)]
     fn str_keys(&self) -> crate::Result<StrKeys<'a, '_>> {
         match self.keys()? {
             Mark::String(keys) => Ok(StrKeys(keys)),

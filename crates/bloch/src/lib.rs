@@ -7,6 +7,7 @@ use chrono_tz::Tz;
 use log::debug;
 use std::collections::HashMap;
 use std::{
+    io,
     iter::Peekable,
     net::{Ipv4Addr, Ipv6Addr},
     ops::Range,
@@ -23,9 +24,10 @@ pub mod reader;
 pub mod slice;
 pub(crate) mod types;
 pub mod value;
+pub mod writer;
 pub mod zc;
 
-pub use bloch_derive::{FromBlock, FromVariant};
+pub use bloch_derive::{FromBlock, FromVariant, IntoVariant, WriteBlock};
 pub use bstr::BStr;
 pub use error::Error;
 pub use interval::Interval;
@@ -292,6 +294,124 @@ impl<'a> ParsedBlock<'a> {
             self.col_names[left..right].rotate_right(1);
             self.markers[left..right].rotate_right(1);
         }
+    }
+}
+
+/// Builds one uncompressed Native block from `*Item` rows.
+///
+/// ```ignore
+/// let mut writer = BlockWriter::from_reader(&source);
+/// for block in blocks {
+///     for row in block { writer.write(row)?; }
+///     writer.encode(&mut out)?;
+/// }
+/// ```
+///
+/// [`Self::encode`] leaves the writer empty with its buffers and dictionary tables allocated,
+/// so one writer serves a whole stream of blocks without reallocating.
+///
+/// Built-in column columns own retained values. Each [`Self::write`] call may borrow
+/// from a different input row; that input can be dropped before the next write or encode.
+///
+/// A row that fails to write leaves the block invalid: later writes and [`Self::encode`]
+/// report [`Error::WriteFailed`]; `encode` then discards the block and the writer is usable
+/// again.
+pub struct BlockWriter<W: writer::RowWriter> {
+    writer: W,
+    rows: usize,
+    failed: bool,
+}
+
+impl<W: writer::RowWriter + Default> Default for BlockWriter<W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<W: writer::RowWriter> BlockWriter<W> {
+    pub fn new() -> Self
+    where
+        W: Default,
+    {
+        Self::with_writer(W::default())
+    }
+
+    pub fn with_capacity(rows: usize) -> Self
+    where
+        W: Default,
+    {
+        let mut writer = Self::new();
+        writer.reserve(rows);
+        writer
+    }
+
+    /// A writer with the source's column parameters (FixedString sizes, time zones, ...),
+    /// sized for the source block: its rows, array elements and dictionary entries.
+    pub fn from_reader<'a, Reader>(reader: &Reader) -> Self
+    where
+        Reader: reader::TryRead<'a>,
+        Reader::Item: writer::Row<Reader = Reader, Writer = W>,
+    {
+        let mut writer = Self::with_writer(<Reader::Item as writer::Row>::writer(reader));
+        writer.reserve(reader.len());
+        writer
+    }
+
+    pub const fn with_writer(writer: W) -> Self {
+        Self {
+            writer,
+            rows: 0,
+            failed: false,
+        }
+    }
+
+    pub fn reserve(&mut self, rows: usize) {
+        self.writer.reserve(rows);
+    }
+
+    pub fn write<R: writer::Row<Writer = W>>(&mut self, row: R) -> Result<()> {
+        if self.failed {
+            return Err(Error::WriteFailed);
+        }
+        if let Err(error) = row.write(&mut self.writer) {
+            self.failed = true;
+            return Err(error);
+        }
+        self.rows += 1;
+        Ok(())
+    }
+
+    pub const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Bytes of column data buffered for the current block: the encoded block size without
+    /// its header, column names, types and prefixes.
+    pub fn data_len(&self) -> usize {
+        self.writer.data_len()
+    }
+
+    /// Writes the block to `out` and empties the writer. `out` is used as-is: a `Vec<u8>`, a
+    /// `BufWriter`, a compressing encoder; nothing is buffered here beyond the column data.
+    pub fn encode(&mut self, out: &mut impl io::Write) -> Result<()> {
+        let result = if self.failed {
+            Err(Error::WriteFailed)
+        } else {
+            self.writer.flush().and_then(|()| self.write_block(out))
+        };
+        self.writer.clear();
+        self.rows = 0;
+        self.failed = false;
+        result
+    }
+
+    fn write_block(&self, out: &mut impl io::Write) -> Result<()> {
+        let mut header = Vec::with_capacity(20);
+        writer::write_varuint(W::NUM_COLUMNS as u64, &mut header);
+        writer::write_varuint(self.rows as u64, &mut header);
+        out.write_all(&header)?;
+        self.writer.encode(self.rows, out)?;
+        Ok(())
     }
 }
 

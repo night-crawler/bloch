@@ -1609,6 +1609,7 @@ mod serde_tests {
                 }),
                 mark::Mark::DateTime(mark::DateTime {
                     tz: chrono_tz::UTC,
+                    explicit_tz: false,
                     data: ByteView::<DateTime32Data>::try_from(datetime_bytes.as_slice())?,
                 }),
             ],

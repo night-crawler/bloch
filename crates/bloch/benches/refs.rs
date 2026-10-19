@@ -1,58 +1,21 @@
-use std::{fs, hint::black_box, net::Ipv6Addr, time::Duration};
+use std::{fs, hint::black_box, time::Duration};
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod common;
+#[path = "common/sample.rs"]
+mod sample;
 
 use bloch::{BlockRow, BlocksIterator, FromBlock as _, parse::block::parse_many};
 use chrono::Utc;
-use clickhouse::rowbinary::de::deserialize_from;
+use clickhouse::rowbinary::de::deserialize_row_without_validation;
 use criterion::{Criterion, criterion_group, criterion_main};
 use testresult::TestResult;
 
 use crate::common::BenchmarkCols;
-
-#[derive(clickhouse::Row, serde::Deserialize, Debug)]
-pub struct BenchmarkSample<'a> {
-    #[serde(with = "clickhouse::serde::uuid")]
-    pub id: uuid::Uuid,
-
-    pub lc_string_cd10: &'a str,
-
-    #[serde(with = "clickhouse::serde::chrono::datetime")]
-    pub timestamp: chrono::DateTime<Utc>,
-
-    pub count: f64,
-    pub some_number: u32,
-
-    pub lc_nullable_string_cd1000: Option<&'a str>,
-    pub lc_nullable_string_cd5000: Option<&'a str>,
-    pub lc_nullable_string_cd3000: Option<&'a str>,
-    pub lc_nullable_string_cd4000: Option<&'a str>,
-    pub lc_nullable_string_cd50000: Option<&'a str>,
-    pub lc_nullable_string_cd100: Option<&'a str>,
-    pub lc_nullable_string_cd500: Option<&'a str>,
-
-    pub some_ip_address: Option<Ipv6Addr>,
-
-    pub lc_nullable_string8: Option<&'a str>,
-    pub lc_tags: Vec<&'a str>,
-    pub lc_nullable_string_cd_00000: Option<&'a str>,
-
-    #[serde(rename = "nested_field.lc_string_cd10")]
-    pub nested_lc_string_cd10: Vec<&'a str>,
-
-    #[serde(rename = "nested_field.flag")]
-    pub nested_flag: Vec<bool>,
-
-    #[serde(rename = "nested_field.some_id")]
-    pub nested_some_id: Vec<u128>,
-
-    #[serde(rename = "nested_field.some_other_id")]
-    pub nested_some_other_id: Vec<u64>,
-}
+use crate::sample::BenchmarkSample;
 
 #[inline(always)]
 fn trusted_str(bytes: &bloch::BStr) -> &str {
@@ -67,101 +30,73 @@ impl<'data, 'iter> TryFrom<BlockRow<'data, 'iter>> for BenchmarkSample<'data> {
         let i = row.row_index();
 
         let [
-            id,
-            lc_string_cd10,
+            project,
+            kind,
             timestamp,
             count,
-            some_number,
-            lc_nullable_string_cd1000,
-            lc_nullable_string_cd5000,
-            lc_nullable_string_cd3000,
-            lc_nullable_string_cd4000,
-            lc_nullable_string_cd50000,
-            lc_nullable_string_cd100,
-            lc_nullable_string_cd500,
-            lc_nullable_string8,
-            lc_nullable_string_cd_00000,
-            some_ip_address,
-            lc_tags,
-            nested_field_lc_string_cd10,
-            nested_field_flag,
-            nested_field_some_id,
-            nested_field_some_other_id,
+            rate_hz,
+            host,
+            thread,
+            pod,
+            container,
+            namespace,
+            version,
+            kernel,
+            host_ip,
+            service,
+            tags,
+            exe,
+            frame_kinds,
+            frame_symbolized,
+            frame_file_ids,
+            frame_addrs,
             ..,
         ] = row.cols()
         else {
             unreachable!()
         };
 
-        let tags = lc_tags
+        let tags = tags
             .get_array_lc_strs(i)?
             .unwrap()
             .map(|value| value.map(trusted_str))
             .collect::<Result<Vec<_>, _>>()?;
-        let nested_strs = nested_field_lc_string_cd10
+        let frame_kinds = frame_kinds
             .get_array_lc_strs(i)?
             .unwrap()
             .map(|value| value.map(trusted_str))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut nested_some_id = Vec::with_capacity(nested_strs.len());
+        let mut file_ids = Vec::with_capacity(frame_kinds.len());
         let slice: &[zerocopy::little_endian::U128] =
-            nested_field_some_id.get_arr_uint128_slice(i)?.unwrap();
-        nested_some_id.extend(slice.iter().map(|v| v.get()));
+            frame_file_ids.get_arr_uint128_slice(i)?.unwrap();
+        file_ids.extend(slice.iter().map(|v| v.get()));
 
-        let mut nested_some_other_id = Vec::with_capacity(nested_strs.len());
-        let slice: &[zerocopy::little_endian::U64] =
-            nested_field_some_other_id.get_arr_uint64_slice(i)?.unwrap();
-        nested_some_other_id.extend(slice.iter().map(|v| v.get()));
+        let mut addrs = Vec::with_capacity(frame_kinds.len());
+        let slice: &[zerocopy::little_endian::U64] = frame_addrs.get_arr_uint64_slice(i)?.unwrap();
+        addrs.extend(slice.iter().map(|v| v.get()));
 
         let row = Self {
-            id: id.get_uuid(i)?.unwrap(),
-            lc_string_cd10: trusted_str(lc_string_cd10.get_str(i)?.unwrap()),
+            project: project.get_uuid(i)?.unwrap(),
+            kind: trusted_str(kind.get_str(i)?.unwrap()),
             timestamp: timestamp.get_datetime(i, Utc)?.unwrap(),
             count: count.get_f64(i)?.unwrap(),
-            some_number: some_number.get_u32(i)?.unwrap(),
-            lc_nullable_string_cd1000: lc_nullable_string_cd1000
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            lc_nullable_string_cd5000: lc_nullable_string_cd5000
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            lc_nullable_string_cd3000: lc_nullable_string_cd3000
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            lc_nullable_string_cd4000: lc_nullable_string_cd4000
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            lc_nullable_string_cd50000: lc_nullable_string_cd50000
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            lc_nullable_string_cd100: lc_nullable_string_cd100
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            lc_nullable_string_cd500: lc_nullable_string_cd500
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            some_ip_address: some_ip_address.get_opt_ipv6(i)?.unwrap(),
-            lc_nullable_string8: lc_nullable_string8
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            lc_tags: tags,
-            lc_nullable_string_cd_00000: lc_nullable_string_cd_00000
-                .get_opt_str(i)?
-                .unwrap()
-                .map(trusted_str),
-            nested_lc_string_cd10: nested_strs,
-            nested_flag: nested_field_flag.get_arr_bool_iter(i)?.unwrap().collect(),
-            nested_some_id,
-            nested_some_other_id,
+            rate_hz: rate_hz.get_u32(i)?.unwrap(),
+            host: host.get_opt_str(i)?.unwrap().map(trusted_str),
+            thread: thread.get_opt_str(i)?.unwrap().map(trusted_str),
+            pod: pod.get_opt_str(i)?.unwrap().map(trusted_str),
+            container: container.get_opt_str(i)?.unwrap().map(trusted_str),
+            namespace: namespace.get_opt_str(i)?.unwrap().map(trusted_str),
+            version: version.get_opt_str(i)?.unwrap().map(trusted_str),
+            kernel: kernel.get_opt_str(i)?.unwrap().map(trusted_str),
+            host_ip: host_ip.get_opt_ipv6(i)?.unwrap(),
+            service: service.get_opt_str(i)?.unwrap().map(trusted_str),
+            tags,
+            exe: exe.get_opt_str(i)?.unwrap().map(trusted_str),
+            frame_kinds,
+            frame_symbolized: frame_symbolized.get_arr_bool_iter(i)?.unwrap().collect(),
+            frame_file_ids: file_ids,
+            frame_addrs: addrs,
         };
 
         Ok(row)
@@ -170,7 +105,7 @@ impl<'data, 'iter> TryFrom<BlockRow<'data, 'iter>> for BenchmarkSample<'data> {
 
 fn ch_rs_read(mut input: &[u8]) -> TestResult {
     while !input.is_empty() {
-        let value: BenchmarkSample = deserialize_from(&mut input)?;
+        let value: BenchmarkSample = deserialize_row_without_validation(&mut input)?;
         black_box(value);
     }
     Ok(())
@@ -181,26 +116,26 @@ fn native_read(input: &[u8]) -> TestResult<()> {
     let it = BlocksIterator::new_ordered(
         &mut blocks,
         &[
-            "id",
-            "lc_string_cd10",
+            "project",
+            "kind",
             "timestamp",
             "count",
-            "some_number",
-            "lc_nullable_string_cd1000",
-            "lc_nullable_string_cd5000",
-            "lc_nullable_string_cd3000",
-            "lc_nullable_string_cd4000",
-            "lc_nullable_string_cd50000",
-            "lc_nullable_string_cd100",
-            "lc_nullable_string_cd500",
-            "lc_nullable_string8",
-            "lc_nullable_string_cd_00000",
-            "some_ip_address",
-            "lc_tags",
-            "nested_field.lc_string_cd10",
-            "nested_field.flag",
-            "nested_field.some_id",
-            "nested_field.some_other_id",
+            "rate_hz",
+            "host",
+            "thread",
+            "pod",
+            "container",
+            "namespace",
+            "version",
+            "kernel",
+            "host_ip",
+            "service",
+            "tags",
+            "exe",
+            "frames.kind",
+            "frames.symbolized",
+            "frames.file_id",
+            "frames.addr",
         ],
     )?;
 
@@ -222,37 +157,37 @@ fn native_derive_read(input: &[u8]) -> TestResult<()> {
     for row in BenchmarkCols::iter_blocks(&blocks) {
         let row = row?;
         let sample = BenchmarkSample {
-            id: row.id,
-            lc_string_cd10: row.lc_string_cd10,
+            project: row.project,
+            kind: row.kind,
             timestamp: row.timestamp.with_timezone(&Utc),
             count: row.count,
-            some_number: row.some_number,
-            lc_nullable_string_cd1000: row.lc_nullable_string_cd1000,
-            lc_nullable_string_cd5000: row.lc_nullable_string_cd5000,
-            lc_nullable_string_cd3000: row.lc_nullable_string_cd3000,
-            lc_nullable_string_cd4000: row.lc_nullable_string_cd4000,
-            lc_nullable_string_cd50000: row.lc_nullable_string_cd50000,
-            lc_nullable_string_cd100: row.lc_nullable_string_cd100,
-            lc_nullable_string_cd500: row.lc_nullable_string_cd500,
-            some_ip_address: row.some_ip_address,
-            lc_nullable_string8: row.lc_nullable_string8,
-            lc_tags: row.lc_tags.try_collect_vec()?,
-            lc_nullable_string_cd_00000: row.lc_nullable_string_cd_00000,
-            nested_lc_string_cd10: row.nested_lc_string_cd10.try_collect_vec()?,
-            nested_flag: row
-                .nested_flag
+            rate_hz: row.rate_hz,
+            host: row.host,
+            thread: row.thread,
+            pod: row.pod,
+            container: row.container,
+            namespace: row.namespace,
+            version: row.version,
+            kernel: row.kernel,
+            host_ip: row.host_ip,
+            service: row.service,
+            tags: row.tags.try_collect_vec()?,
+            exe: row.exe,
+            frame_kinds: row.frame_kinds.try_collect_vec()?,
+            frame_symbolized: row
+                .frame_symbolized
                 .try_as_slice()?
                 .iter()
                 .map(|&v| v == 1)
                 .collect(),
-            nested_some_id: row
-                .nested_some_id
+            frame_file_ids: row
+                .frame_file_ids
                 .try_as_slice()?
                 .iter()
                 .map(|v| v.get())
                 .collect(),
-            nested_some_other_id: row
-                .nested_some_other_id
+            frame_addrs: row
+                .frame_addrs
                 .try_as_slice()?
                 .iter()
                 .map(|v| v.get())
@@ -278,39 +213,39 @@ fn native_derive_direct_read(input: &[u8]) -> TestResult<()> {
         let cols = BenchmarkCols::from_block(block)?;
         for i in 0..block.num_rows {
             let sample = BenchmarkSample {
-                id: cols.id.try_read(i)?,
-                lc_string_cd10: cols.lc_string_cd10.try_read(i)?,
+                project: cols.project.try_read(i)?,
+                kind: cols.kind.try_read(i)?,
                 timestamp: cols.timestamp.try_read(i)?.with_timezone(&Utc),
                 count: cols.count.try_read(i)?,
-                some_number: cols.some_number.try_read(i)?,
-                lc_nullable_string_cd1000: cols.lc_nullable_string_cd1000.try_read(i)?,
-                lc_nullable_string_cd5000: cols.lc_nullable_string_cd5000.try_read(i)?,
-                lc_nullable_string_cd3000: cols.lc_nullable_string_cd3000.try_read(i)?,
-                lc_nullable_string_cd4000: cols.lc_nullable_string_cd4000.try_read(i)?,
-                lc_nullable_string_cd50000: cols.lc_nullable_string_cd50000.try_read(i)?,
-                lc_nullable_string_cd100: cols.lc_nullable_string_cd100.try_read(i)?,
-                lc_nullable_string_cd500: cols.lc_nullable_string_cd500.try_read(i)?,
-                some_ip_address: cols.some_ip_address.try_read(i)?,
-                lc_nullable_string8: cols.lc_nullable_string8.try_read(i)?,
-                lc_tags: cols.lc_tags.try_read(i)?.try_collect_vec()?,
-                lc_nullable_string_cd_00000: cols.lc_nullable_string_cd_00000.try_read(i)?,
-                nested_lc_string_cd10: cols.nested_lc_string_cd10.try_read(i)?.try_collect_vec()?,
-                nested_flag: cols
-                    .nested_flag
+                rate_hz: cols.rate_hz.try_read(i)?,
+                host: cols.host.try_read(i)?,
+                thread: cols.thread.try_read(i)?,
+                pod: cols.pod.try_read(i)?,
+                container: cols.container.try_read(i)?,
+                namespace: cols.namespace.try_read(i)?,
+                version: cols.version.try_read(i)?,
+                kernel: cols.kernel.try_read(i)?,
+                host_ip: cols.host_ip.try_read(i)?,
+                service: cols.service.try_read(i)?,
+                tags: cols.tags.try_read(i)?.try_collect_vec()?,
+                exe: cols.exe.try_read(i)?,
+                frame_kinds: cols.frame_kinds.try_read(i)?.try_collect_vec()?,
+                frame_symbolized: cols
+                    .frame_symbolized
                     .try_read(i)?
                     .try_as_slice()?
                     .iter()
                     .map(|&v| v == 1)
                     .collect(),
-                nested_some_id: cols
-                    .nested_some_id
+                frame_file_ids: cols
+                    .frame_file_ids
                     .try_read(i)?
                     .try_as_slice()?
                     .iter()
                     .map(|v| v.get())
                     .collect(),
-                nested_some_other_id: cols
-                    .nested_some_other_id
+                frame_addrs: cols
+                    .frame_addrs
                     .try_read(i)?
                     .try_as_slice()?
                     .iter()

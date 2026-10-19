@@ -23,6 +23,7 @@ mimalloc = { workspace = true, optional = true }
 nom = { workspace = true }
 paste = { workspace = true }
 rust_decimal = { workspace = true }
+rustc-hash = { workspace = true }
 serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
@@ -32,6 +33,7 @@ zerocopy = { workspace = true }
 clickhouse = { workspace = true }
 criterion = { workspace = true }
 env_logger = { workspace = true }
+flate2 = { workspace = true }
 pretty_assertions = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -43,6 +45,10 @@ harness = false
 
 [[bench]]
 name = "throughput"
+harness = false
+
+[[bench]]
+name = "write"
 harness = false
 
 # Fixed-work driver for `scripts/perf_rows.py`; not a criterion bench.

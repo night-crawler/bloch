@@ -19,6 +19,7 @@ syn = { workspace = true }
 # Renamed on purpose: the tests cover the `proc-macro-crate` lookup that resolves
 # `bloch` under a caller-chosen name.
 renamed_bloch = { package = "bloch", path = "../bloch" }
+chrono.workspace = true
 
 [lints]
 workspace = true
