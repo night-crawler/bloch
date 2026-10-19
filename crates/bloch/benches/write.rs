@@ -9,7 +9,7 @@ mod sample;
 
 use bloch::reader::{
     Array, Bool, DateTime, F64, Ipv6, Lc, LcNullable, LcNullableTrustedStr, LcTrustedStr, Nullable,
-    TryRead, U32, U64, U128, Uuid,
+    U32, U64, U128, Uuid,
 };
 use bloch::writer::Row;
 use bloch::{BlockWriter, FromBlock, WriteBlock, parse::block::parse_many};
@@ -20,6 +20,8 @@ use testresult::TestResult;
 use crate::sample::BenchmarkSample;
 
 const ROWS: usize = 1_000_000;
+/// Rows per batch: each batch gets a fresh unsized writer and output buffer.
+const BATCH_ROWS: usize = 300_000;
 
 /// `benchmark_sample_lc`: every repetitive column is `LowCardinality`, including the UUID,
 /// DateTime, Float64, UInt32, IPv6 scalars and the UInt128/UInt64 frame arrays.
@@ -103,40 +105,71 @@ fn rowbinary_rows(mut input: &[u8]) -> TestResult<Vec<BenchmarkSample<'_>>> {
     Ok(rows)
 }
 
-fn native_blocks<'a, R: FromBlock<'a>>(blocks: &'a [bloch::ParsedBlock<'a>]) -> TestResult<Vec<R>> {
-    Ok(blocks.iter().map(R::from_block).collect::<Result<_, _>>()?)
+// Both layouts accept the same ordinary values. Arrays borrow materialized Vecs;
+// there are no Native readers, dictionary lookups, or array allocations on input.
+macro_rules! value_rows {
+    ($($row:ident),+ $(,)?) => {$(
+        impl<'a> From<&'a BenchmarkSample<'_>> for $row<'a> {
+            fn from(value: &'a BenchmarkSample<'_>) -> Self {
+                Self {
+                    project: value.project,
+                    kind: value.kind,
+                    timestamp: value.timestamp,
+                    count: value.count,
+                    rate_hz: value.rate_hz,
+                    host: value.host,
+                    thread: value.thread,
+                    pod: value.pod,
+                    container: value.container,
+                    namespace: value.namespace,
+                    version: value.version,
+                    kernel: value.kernel,
+                    host_ip: value.host_ip,
+                    service: value.service,
+                    tags: &value.tags,
+                    exe: value.exe,
+                    frame_kinds: &value.frame_kinds,
+                    frame_symbolized: &value.frame_symbolized,
+                    frame_file_ids: &value.frame_file_ids,
+                    frame_addrs: &value.frame_addrs,
+                }
+            }
+        }
+    )+};
 }
+value_rows!(LcColsRow, PlainColsRow);
 
-fn write_rowbinary(rows: &[BenchmarkSample<'_>], out: &mut Vec<u8>) -> TestResult<usize> {
-    out.clear();
-    for row in rows.iter().cycle().take(ROWS) {
-        serialize_row_binary(&mut *out, row)?;
-    }
-    Ok(out.len())
-}
-
-/// One output block per source block; one writer (sized from the first block) and one output
-/// buffer for the whole stream. Items hold array iterators, so every row is `try_read` from
-/// the parsed block again (dictionary lookups, no allocation).
-fn write_native<'a, R>(blocks: &[R], out: &mut Vec<u8>) -> TestResult<usize>
-where
-    R: TryRead<'a>,
-    R::Item: Row<Reader = R>,
-{
-    let mut writer = BlockWriter::from_reader(&blocks[0]);
+fn write_rowbinary(rows: &[BenchmarkSample<'_>]) -> TestResult<usize> {
+    let mut input = rows.iter().cycle().take(ROWS);
     let mut bytes = 0;
-    let mut rows = 0;
-    for reader in blocks.iter().cycle() {
-        if rows == ROWS {
-            break;
+    for _ in 0..ROWS.div_ceil(BATCH_ROWS) {
+        let mut out = Vec::new();
+        for row in input.by_ref().take(BATCH_ROWS) {
+            serialize_row_binary(&mut out, row)?;
         }
-        for i in 0..reader.len() {
-            writer.write(reader.try_read(i)?)?;
-        }
-        rows += reader.len();
-        out.clear();
-        writer.encode(out)?;
         bytes += black_box(&out).len();
+    }
+    Ok(bytes)
+}
+
+/// Fresh unsized writer and output allocation per batch, as in the ingest cache's
+/// mem::take/encode/drop lifecycle. No source-derived capacity hints or buffer reuse.
+fn write_native<R>(rows: &[R], mut observe: impl FnMut(&[u8])) -> TestResult<usize>
+where
+    R: Row + Copy,
+    R::Writer: Default,
+{
+    let mut input = rows.iter().copied().cycle().take(ROWS);
+    let mut bytes = 0;
+    for _ in 0..ROWS.div_ceil(BATCH_ROWS) {
+        let mut writer = BlockWriter::<R::Writer>::new();
+        for row in input.by_ref().take(BATCH_ROWS) {
+            writer.write(row)?;
+        }
+        let mut out = Vec::new();
+        writer.encode(&mut out)?;
+        bytes += out.len();
+        observe(&out);
     }
     Ok(bytes)
 }
@@ -144,44 +177,88 @@ where
 fn bench_writers(c: &mut Criterion) {
     let testdata = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/testdata/");
     let rb_data = fs::read(format!("{testdata}benchmark_sample.rb")).expect("RowBinary fixture");
-    let lc_data = fs::read(format!("{testdata}benchmark_sample_lc.native")).expect("LC fixture");
-    let plain_data = fs::read(format!("{testdata}benchmark_sample.native")).expect("plain fixture");
-
     let rows = rowbinary_rows(&rb_data).expect("RowBinary fixture decodes");
-    let lc_parsed = parse_many(&lc_data).expect("LC fixture parses");
-    let lc_blocks: Vec<LcCols<'_>> = native_blocks(&lc_parsed).expect("LC fixture decodes");
-    let plain_parsed = parse_many(&plain_data).expect("plain fixture parses");
-    let plain_blocks: Vec<PlainCols<'_>> =
-        native_blocks(&plain_parsed).expect("plain fixture decodes");
-    let source_rows: usize = lc_blocks.iter().map(LcCols::len).sum();
-    assert_eq!(rows.len(), source_rows, "fixtures hold the same rows");
-    assert_eq!(
-        plain_blocks.iter().map(PlainCols::len).sum::<usize>(),
-        source_rows
-    );
-    assert_eq!(ROWS % source_rows, 0, "cycle whole fixtures");
+    assert!(!rows.is_empty(), "fixture must contain rows");
+    let lc_rows: Vec<_> = rows.iter().map(LcColsRow::from).collect();
+    let plain_rows: Vec<_> = rows.iter().map(PlainColsRow::from).collect();
 
-    let mut rb_out = Vec::new();
-    let mut native_out = Vec::new();
-    let rb_bytes = write_rowbinary(&rows, &mut rb_out).unwrap();
-    let lc_bytes = write_native(&lc_blocks, &mut native_out).unwrap();
-    let plain_bytes = write_native(&plain_blocks, &mut native_out).unwrap();
+    // Untimed preflight: check every emitted value, including the final partial
+    // batch, against the ordinary input rows. Only output is decoded here.
+    macro_rules! scalar {
+        ($actual:ident, $expected:ident, $($field:ident),+ $(,)?) => {$(
+            assert_eq!($actual.$field, $expected.$field, stringify!($field));
+        )+};
+    }
+    macro_rules! array {
+        ($actual:ident, $expected:ident, $($field:ident),+ $(,)?) => {$(
+            assert_eq!(
+                $actual.$field.try_collect_vec().unwrap(),
+                $expected.$field,
+                stringify!($field),
+            );
+        )+};
+    }
+    macro_rules! validate_native {
+        ($reader:ident, $values:ident) => {{
+            let mut expected = rows.iter().cycle();
+            let mut checked = 0;
+            let bytes = write_native(&$values, |out| {
+                for block in parse_many(out).expect("encoded block parses") {
+                    for actual in $reader::rows(&block).expect("encoded columns decode") {
+                        let actual = actual.expect("encoded row decodes");
+                        let expected = expected.next().unwrap();
+                        scalar!(
+                            actual, expected, project, kind, rate_hz, host, thread, pod, container,
+                            namespace, version, kernel, host_ip, service, exe,
+                        );
+                        assert_eq!(actual.timestamp.to_utc(), expected.timestamp);
+                        assert_eq!(actual.count.to_bits(), expected.count.to_bits());
+                        array!(
+                            actual,
+                            expected,
+                            tags,
+                            frame_kinds,
+                            frame_symbolized,
+                            frame_file_ids,
+                            frame_addrs,
+                        );
+                        checked += 1;
+                    }
+                }
+            })
+            .unwrap();
+            assert_eq!(checked, ROWS);
+            bytes
+        }};
+    }
+    let rb_bytes = write_rowbinary(&rows).unwrap();
+    let lc_bytes = validate_native!(LcCols, lc_rows);
+    let plain_bytes = validate_native!(PlainCols, plain_rows);
     eprintln!(
-        "{ROWS} rows in {} blocks of {:?} rows: RowBinary {rb_bytes} bytes, Native LC {lc_bytes} bytes, Native plain {plain_bytes} bytes",
-        lc_blocks.len() * (ROWS / source_rows),
-        lc_blocks.iter().map(LcCols::len).collect::<Vec<_>>(),
+        "{ROWS} slice-backed rows in {} fresh batches (max {BATCH_ROWS} rows): RowBinary {rb_bytes} bytes, Native LC {lc_bytes} bytes, Native plain {plain_bytes} bytes",
+        ROWS.div_ceil(BATCH_ROWS),
     );
 
     let mut group = c.benchmark_group("write");
     group.throughput(Throughput::Elements(ROWS as u64));
     group.bench_function("rowbinary", |b| {
-        b.iter(|| write_rowbinary(black_box(&rows), &mut rb_out).unwrap())
+        b.iter(|| write_rowbinary(black_box(&rows)).unwrap())
     });
     group.bench_function("native_lc", |b| {
-        b.iter(|| write_native(black_box(&lc_blocks), &mut native_out).unwrap())
+        b.iter(|| {
+            write_native(black_box(&lc_rows), |out| {
+                black_box(out);
+            })
+            .unwrap()
+        })
     });
     group.bench_function("native_plain", |b| {
-        b.iter(|| write_native(black_box(&plain_blocks), &mut native_out).unwrap())
+        b.iter(|| {
+            write_native(black_box(&plain_rows), |out| {
+                black_box(out);
+            })
+            .unwrap()
+        })
     });
     group.finish();
 }

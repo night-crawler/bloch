@@ -43,18 +43,11 @@ bloch_derive            time:   [10.185 ms 10.260 ms 10.349 ms]
 bloch_derive_direct     time:   [9.9254 ms 10.010 ms 10.112 ms]
 ```
 
-Writing 1M rows of the same table (`cargo bench --bench write --features mimalloc`), 20 blocks
-of ≤65k rows, one output buffer. `native_lc` uses the `LowCardinality` layout a writer of this
-data would pick (`benchmark_sample_lc.native`: LC on the UUID, DateTime, Float64, UInt32, IPv6
-scalars and the UInt128/UInt64 frame arrays); `native_plain` keeps LC on strings only
-(`benchmark_sample.native`). RowBinary cannot express either.
-
-```
-1000000 rows: RowBinary 726662250 bytes, Native LC 165456800 bytes, Native plain 531113960 bytes
-write/rowbinary         time:   [196.94 ms 198.80 ms 201.04 ms]
-write/native_lc         time:   [630.05 ms 642.64 ms 656.89 ms]
-write/native_plain      time:   [296.76 ms 303.75 ms 315.12 ms]
-```
+| Benchmark            | Time per 1M rows | Output bytes |
+|----------------------|-----------------:|-------------:|
+| `write/rowbinary`    |        288.47 ms |  726,662,250 |
+| `write/native_lc`    |        837.50 ms |  159,545,336 |
+| `write/native_plain` |        550.42 ms |  530,977,464 |
 
 ## Quick start
 
@@ -313,7 +306,8 @@ Every reader type except `Value` (JSON/Dynamic) has a writer.
 
 More examples:
 
-- [`crates/bloch-examples/tests/procedural`](crates/bloch-examples/tests/procedural) manual parsing using generic `Value` and TryFrom
+- [`crates/bloch-examples/tests/procedural`](crates/bloch-examples/tests/procedural) manual parsing using generic
+  `Value` and TryFrom
 - [`crates/bloch-examples/tests/derive`](crates/bloch-examples/tests/derive) derive macro
 
 ```sh

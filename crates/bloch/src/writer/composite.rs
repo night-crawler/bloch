@@ -206,8 +206,12 @@ where
 {
     type Value<'a> = &'a [Values::Value<'a>];
 
+    #[inline(always)]
     fn write(&mut self, values: Self::Value<'_>) -> Result<()> {
-        self.write_iter(values.iter().copied())
+        self.values.write_slice(values)?;
+        self.offsets
+            .push(self.offsets.last().copied().unwrap_or(0) + values.len() as u64);
+        Ok(())
     }
 }
 

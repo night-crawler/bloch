@@ -38,6 +38,16 @@ pub trait ColumnWriter {
 pub trait ValueWriter: ColumnWriter {
     type Value<'a>: 'a;
     fn write(&mut self, value: Self::Value<'_>) -> Result<()>;
+
+    fn write_slice(&mut self, values: &[Self::Value<'_>]) -> Result<()>
+    where
+        for<'a> Self::Value<'a>: Copy,
+    {
+        for &value in values {
+            self.write(value)?;
+        }
+        Ok(())
+    }
 }
 
 /// A column writer built from a reader of the same column type.

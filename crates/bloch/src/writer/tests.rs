@@ -128,6 +128,132 @@ fn array_iter_values_preserve_empty_cells_and_reset_offsets() {
     );
 }
 
+#[test]
+fn array_slice_lc_preserves_order_through_growth_and_clear() {
+    let mut rows: Vec<Vec<u64>> = [0, 1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65]
+        .into_iter()
+        .map(|len| (0..len).map(|i| (i % 17) * 4096).collect())
+        .collect();
+    rows.push((0..65_537).collect());
+    rows.push(vec![u64::MAX, 0, 65_536, u64::MAX]);
+    let mut scalar = Array::new(Lc::<FixedWidthColumn<U64>>::default());
+    let mut slice = Array::new(Lc::<FixedWidthColumn<U64>>::default());
+    for rows in [rows, vec![vec![], vec![65_536, 0, u64::MAX, 65_536]]] {
+        for row in &rows {
+            scalar.write_iter(row.iter().copied()).unwrap();
+            slice.write(row).unwrap();
+        }
+        let bytes = single_column_block("values", &mut slice, rows.len());
+        assert_eq!(
+            bytes,
+            single_column_block("values", &mut scalar, rows.len())
+        );
+        let block = parse(&bytes);
+        let reader =
+            reader::Array::<reader::Lc<'_, reader::U64<'_>>>::try_from(&block.markers[0]).unwrap();
+        for (i, expected) in rows.iter().enumerate() {
+            assert_eq!(
+                reader.try_read(i).unwrap().try_collect_vec().unwrap(),
+                *expected
+            );
+        }
+        scalar.clear();
+        slice.clear();
+    }
+}
+
+#[test]
+fn array_slice_lc_float_keys_remain_bitwise_under_collisions() {
+    #[derive(Default)]
+    struct CollidingHasher;
+    impl std::hash::Hasher for CollidingHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+        fn write(&mut self, _: &[u8]) {}
+    }
+    type Hasher = std::hash::BuildHasherDefault<CollidingHasher>;
+    let mut writer = Array::new(Lc::<FixedWidthColumn<F64>, Hasher>::default());
+    let mut bits: Vec<u64> = (0..128).collect();
+    bits.extend([
+        0x8000_0000_0000_0000,
+        0x7ff8_0000_0000_0001,
+        0x7ff8_0000_0000_0002,
+    ]);
+    bits.extend_from_within(..);
+    let values: Vec<_> = bits.iter().copied().map(f64::from_bits).collect();
+    writer.write(&values).unwrap();
+    // Repeat a fully populated dictionary, including a short tail.
+    writer.write(&values).unwrap();
+    let bytes = single_column_block("values", &mut writer, 2);
+    let block = parse(&bytes);
+    let reader =
+        reader::Array::<reader::Lc<'_, reader::F64<'_>>>::try_from(&block.markers[0]).unwrap();
+    for row in 0..2 {
+        let actual: Vec<_> = reader
+            .try_read(row)
+            .unwrap()
+            .map(|value| value.unwrap().to_bits())
+            .collect();
+        assert_eq!(actual, bits);
+    }
+}
+
+#[test]
+fn array_slice_lc_can_be_cleared_after_inner_write_error() {
+    let mut writer = Array::new(Lc::<FixedWidthColumn<Usize>>::new(FixedWidthColumn::new(
+        Usize { width: 1 },
+    )));
+    assert!(matches!(
+        writer.write(&[7, 7, 256, 8]),
+        Err(Error::ValueOutOfRange(..))
+    ));
+    writer.clear();
+    writer.write(&[255, 0, 255]).unwrap();
+    let bytes = single_column_block("values", &mut writer, 1);
+    let block = parse(&bytes);
+    let reader =
+        reader::Array::<reader::Lc<'_, reader::U8<'_>>>::try_from(&block.markers[0]).unwrap();
+    assert_eq!(
+        reader.try_read(0).unwrap().try_collect_vec().unwrap(),
+        [255, 0, 255]
+    );
+}
+
+#[test]
+fn fixed_width_array_slices_preserve_wide_values_and_empty_cells() {
+    let values: Vec<u128> = (0..65).map(|i| (i << 96) | (u128::MAX - i)).collect();
+    let mut writer = Array::new(FixedWidthColumn::<U128>::default());
+    writer.write(&values).unwrap();
+    writer.write(&[]).unwrap();
+    writer.write(&values[..1]).unwrap();
+    let bytes = single_column_block("values", &mut writer, 3);
+    let block = parse(&bytes);
+    let reader = reader::Array::<reader::U128<'_>>::try_from(&block.markers[0]).unwrap();
+    for (i, expected) in [&values[..], &[], &values[..1]].into_iter().enumerate() {
+        assert_eq!(
+            reader.try_read(i).unwrap().try_collect_vec().unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn fixed_width_slice_keeps_successful_prefix_on_conversion_error() {
+    let mut writer = FixedWidthColumn::<Date>::default();
+    let valid = chrono::NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
+    let invalid = chrono::NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
+    assert!(writer.write_slice(&[valid, invalid, valid]).is_err());
+    let mut bytes = Vec::new();
+    writer.write_data(&mut bytes).unwrap();
+    assert_eq!(bytes, [1, 0]);
+    writer.clear();
+    writer.write_slice(&[valid, valid]).unwrap();
+    bytes.clear();
+    writer.write_data(&mut bytes).unwrap();
+    assert_eq!(bytes, [1, 0, 1, 0]);
+}
+
 /// `encode` takes any `io::Write`; a compressing encoder must see the same bytes a `Vec` gets.
 #[test]
 fn encode_streams_into_a_compressing_writer() {

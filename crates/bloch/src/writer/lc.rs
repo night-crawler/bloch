@@ -207,6 +207,29 @@ impl<Inner: LcColumn, S: BuildHasher + Default> Dictionary<Inner, S> {
         write(&mut self.inner, value)
     }
 
+    fn write_slice<V>(
+        &mut self,
+        values: &[V],
+        write: impl Fn(&mut Inner, V) -> Result<()>,
+    ) -> Result<()>
+    where
+        V: LcKey<Owned = Inner::Key>,
+        Inner::Key: Borrow<V::Borrowed>,
+    {
+        self.indices.reserve(values.len());
+        for &value in values {
+            if let Some(&index) = self.slots.get(value.as_borrowed().borrow()) {
+                self.indices.push(index);
+            } else {
+                let index = u32::try_from(self.slots.len() + usize::from(self.nullable))?;
+                self.slots.insert(value.into_owned(), index);
+                self.indices.push(index);
+                write(&mut self.inner, value)?;
+            }
+        }
+        Ok(())
+    }
+
     fn write_prefix(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&LOW_CARDINALITY_VERSION.to_le_bytes())
     }
@@ -365,6 +388,10 @@ where
 
     fn write(&mut self, value: Inner::Value<'_>) -> Result<()> {
         self.dict.write(value, Inner::write)
+    }
+
+    fn write_slice(&mut self, values: &[Self::Value<'_>]) -> Result<()> {
+        self.dict.write_slice(values, Inner::write)
     }
 }
 
